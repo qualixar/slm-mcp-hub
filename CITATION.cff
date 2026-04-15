@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use SLM MCP Hub in your research, please cite it as below."
+type: software
+title: "SLM MCP Hub: The World's First MCP Gateway That Learns"
+version: 0.1.0
+date-released: "2026-04-15"
+license: AGPL-3.0-or-later
+repository-code: "https://github.com/qualixar/slm-mcp-hub"
+url: "https://qualixar.com/slm-mcp-hub"
+authors:
+  - family-names: Bhardwaj
+    given-names: Varun Pratap
+    affiliation: Qualixar
+keywords:
+  - mcp
+  - model-context-protocol
+  - gateway
+  - ai-agents
+  - tool-federation
+  - superlocalmemory
+references:
+  - type: article
+    title: "SuperLocalMemory V3: Information-Geometric Foundations for Zero-LLM Enterprise Agent Memory"
+    authors:
+      - family-names: Bhardwaj
+        given-names: Varun Pratap
+    year: 2026
+    journal: "arXiv preprint arXiv:2603.14588"
+    url: "https://arxiv.org/abs/2603.14588"

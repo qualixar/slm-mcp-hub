@@ -1,0 +1,73 @@
+{
+  "name": "slm-mcp-hub",
+  "version": "0.1.1",
+  "description": "The world's first MCP gateway that learns. Intelligent federation, caching, cost tracking, and SLM memory integration for Model Context Protocol servers.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "gateway",
+    "proxy",
+    "ai-tools",
+    "slm",
+    "superlocalmemory",
+    "qualixar",
+    "claude",
+    "claude-code",
+    "mcp-hub",
+    "tool-federation",
+    "ai-agent"
+  ],
+  "author": {
+    "name": "Varun Pratap Bhardwaj",
+    "email": "varun@qualixar.com",
+    "url": "https://varunpratap.com"
+  },
+  "license": "AGPL-3.0-or-later",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/qualixar/slm-mcp-hub.git"
+  },
+  "homepage": "https://qualixar.com/slm-mcp-hub",
+  "bugs": {
+    "url": "https://github.com/qualixar/slm-mcp-hub/issues"
+  },
+  "bin": {
+    "slm-hub": "./bin/slm-hub-npm"
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.js",
+    "test": "echo \"Run: slm-hub status\" && exit 0"
+  },
+  "engines": {
+    "node": ">=14.0.0",
+    "npm": ">=6.0.0"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "files": [
+    "bin/",
+    "scripts/",
+    "src/",
+    "docs/",
+    "README.md",
+    "LICENSE",
+    "NOTICE",
+    "CHANGELOG.md",
+    "pyproject.toml"
+  ],
+  "preferGlobal": true,
+  "funding": {
+    "type": "github",
+    "url": "https://github.com/sponsors/varun369"
+  },
+  "maintainers": [
+    {
+      "name": "Varun Pratap Bhardwaj",
+      "email": "varun@qualixar.com",
+      "url": "https://github.com/varun369"
+    }
+  ]
+}

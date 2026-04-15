@@ -1,0 +1,35 @@
+#!/usr/bin/env node
+/**
+ * SLM MCP Hub — npm binary wrapper.
+ * Forwards all arguments to the Python `slm-hub` CLI.
+ */
+const { spawnSync } = require('child_process');
+const os = require('os');
+
+function findPython() {
+    const candidates = ['python3', 'python'];
+    if (os.platform() === 'win32') candidates.push('py -3');
+    for (const cmd of candidates) {
+        try {
+            const parts = cmd.split(' ');
+            const r = spawnSync(parts[0], [...parts.slice(1), '--version'], {
+                stdio: 'pipe', timeout: 5000,
+                env: { ...process.env, PATH: '/opt/homebrew/bin:/usr/local/bin:/usr/bin:' + (process.env.PATH || '') },
+            });
+            if (r.status === 0 && (r.stdout || '').toString().includes('3.')) return parts;
+        } catch (e) { /* next */ }
+    }
+    return null;
+}
+
+const py = findPython();
+if (!py) {
+    console.error('Python 3.11+ not found. Install from: https://python.org/downloads/');
+    process.exit(1);
+}
+
+const result = spawnSync(py[0], [
+    ...py.slice(1), '-m', 'slm_mcp_hub.cli.main', ...process.argv.slice(2),
+], { stdio: 'inherit', env: process.env });
+
+process.exit(result.status || 0);

@@ -1,0 +1,78 @@
+# Internal planning artifacts (not for public repo)
+.backup/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+dist/
+build/
+*.egg
+*.egg-info/
+.eggs/
+*.whl
+sdist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.classpath
+.settings/
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Testing / Coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.tox/
+.nox/
+
+# Linting / Formatting
+.ruff_cache/
+.mypy_cache/
+.pytype/
+
+# Environment / Secrets
+.env
+.env.local
+.env.*.local
+*.env
+*.pem
+*.key
+
+# Runtime
+*.pid
+*.log
+*.db
+*.db-wal
+*.db-shm
+
+# Node (for npm wrapper)
+node_modules/
+package-lock.json
+npm-debug.log*
+
+# Documentation build
+docs/_build/
+site/
+CLAUDE.md
