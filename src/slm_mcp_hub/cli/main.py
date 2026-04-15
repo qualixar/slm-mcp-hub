@@ -98,9 +98,6 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
             registry = CapabilityRegistry()
             conn_manager = ConnectionManager(config, registry)
 
-            # Connect to all configured MCP servers
-            failed = await conn_manager.connect_all()
-
             router = FederationRouter(registry, conn_manager.connections)
             session_manager = SessionManager(
                 max_sessions=config.max_sessions,
@@ -117,20 +114,11 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
                 proxy_endpoint=proxy,
             )
 
-            click.echo(f"SLM MCP Hub v{VERSION} running on http://{config.host}:{config.port}/mcp")
-            click.echo(f"  MCP servers: {conn_manager.connected_count}/{len(config.mcp_servers)} connected")
-            click.echo(f"  Tools: {registry.tool_count}")
-            click.echo(f"  Plugins: {len(hub.plugins)}")
-            if failed:  # pragma: no cover — only when MCP servers fail to start
-                for name, err in failed.items():
-                    click.echo(f"  WARNING: {name} failed: {err}")
-            click.echo("Press Ctrl+C to stop.")
-
             # Write PID file
             PID_FILE.parent.mkdir(parents=True, exist_ok=True)
             PID_FILE.write_text(str(os.getpid()))
 
-            # Start uvicorn
+            # Start uvicorn FIRST — server available immediately
             uvi_config = uvicorn.Config(
                 app,
                 host=config.host,
@@ -138,6 +126,21 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
                 log_level=config.log_level.lower(),
             )
             server = uvicorn.Server(uvi_config)
+
+            click.echo(f"SLM MCP Hub v{VERSION} starting on http://{config.host}:{config.port}/mcp")
+            click.echo(f"  Configured: {len(config.mcp_servers)} MCP servers")
+            click.echo(f"  Plugins: {len(hub.plugins)}")
+            click.echo("  Connecting to MCP servers in background...")
+
+            # Connect MCPs in background — server is already accepting requests
+            async def _connect_mcps_background() -> None:
+                failed = await conn_manager.connect_all()
+                click.echo(f"  MCP servers: {conn_manager.connected_count}/{len(config.mcp_servers)} connected, {registry.tool_count} tools")
+                if failed:
+                    for name, err in failed.items():
+                        click.echo(f"  WARNING: {name} failed: {err}")
+
+            bg_task = asyncio.create_task(_connect_mcps_background())
 
             try:
                 await server.serve()  # pragma: no cover — blocking server loop
@@ -166,6 +169,29 @@ def status() -> None:
     else:
         click.echo("Hub is not running")
         click.echo(f"  Start with: slm-hub start")
+
+
+@cli.command()
+@click.argument("server_name")
+def reconnect(server_name: str) -> None:
+    """Reconnect a failed or disconnected MCP server."""
+    import httpx
+
+    try:
+        config = load_config()
+        resp = httpx.post(
+            f"http://{config.host}:{config.port}/api/servers/{server_name}/reconnect",
+            timeout=60.0,
+        )
+        data = resp.json()
+        if data.get("success"):
+            click.echo(f"Reconnected: {server_name} ({data.get('message', '')})")
+        else:
+            click.echo(f"Failed: {data.get('message', 'unknown error')}")
+    except httpx.ConnectError:
+        click.echo("Hub is not running. Start with: slm-hub start")
+    except Exception as exc:
+        click.echo(f"Error: {exc}")
 
 
 @cli.group()

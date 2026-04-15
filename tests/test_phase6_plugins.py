@@ -157,7 +157,7 @@ class _ModifyingPlugin(HubPlugin):
 class TestSLMPlugin:
     def test_name_and_version(self, slm_plugin: SLMPlugin) -> None:
         assert slm_plugin.name == "slm"
-        assert slm_plugin.version == "0.1.0"
+        assert slm_plugin.version == "0.1.2"
 
     def test_not_available_initially(self, slm_plugin: SLMPlugin) -> None:
         assert slm_plugin.available is False
@@ -470,7 +470,7 @@ class TestSLMPluginAvailable:
 class TestMeshPlugin:
     def test_name_and_version(self, mesh_plugin: MeshPlugin) -> None:
         assert mesh_plugin.name == "mesh"
-        assert mesh_plugin.version == "0.1.0"
+        assert mesh_plugin.version == "0.1.2"
 
     def test_not_available_initially(self, mesh_plugin: MeshPlugin) -> None:
         assert mesh_plugin.available is False

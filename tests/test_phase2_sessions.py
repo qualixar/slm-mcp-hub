@@ -259,7 +259,8 @@ class TestMCPEndpoint:
         # Meta-tools + 1 federated tool
         assert "hub__search_tools" in names
         assert "hub__list_servers" in names
-        assert "github__search" in names
+        # In federated mode, only meta-tools are exposed (not individual server tools)
+        assert "hub__call_tool" in names
 
     @pytest.mark.asyncio
     async def test_handle_tools_call(self):
@@ -367,7 +368,7 @@ class TestHTTPServer:
         resp = client.get("/api/health")
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
-        assert resp.json()["version"] == "0.1.0"
+        assert resp.json()["version"] == "0.1.2"
         assert resp.json()["state"] == "ready"
 
     def test_status(self):
@@ -416,7 +417,8 @@ class TestHTTPServer:
         tools = resp.json()["result"]["tools"]
         names = [t["name"] for t in tools]
         assert "hub__search_tools" in names
-        assert "github__search" in names
+        # In federated mode, only meta-tools are exposed (not individual server tools)
+        assert "hub__call_tool" in names
 
     def test_mcp_tools_call(self):
         client, _ = self._make_client()

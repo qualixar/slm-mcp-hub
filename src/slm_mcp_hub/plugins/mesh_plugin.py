@@ -83,7 +83,7 @@ class MeshPlugin(HubPlugin):
 
     @property
     def version(self) -> str:
-        return "0.1.0"
+        return "0.1.2"
 
     @property
     def available(self) -> bool:

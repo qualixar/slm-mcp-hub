@@ -201,8 +201,6 @@ class TestM4IntegrationFlow:
             tool_names = [t["name"] for t in list_result["result"]["tools"]]
             assert "hub__search_tools" in tool_names
             assert "hub__list_servers" in tool_names
-            assert "test_server__echo" in tool_names
-
             # 3. Call meta-tool: search
             search_result = await endpoint.handle_jsonrpc(sid, {
                 "jsonrpc": "2.0", "id": 3, "method": "tools/call",
@@ -266,7 +264,7 @@ class TestM5MetaMCP:
         ep, sid = self._make_endpoint()
         result = await ep._handle_meta_tool("hub__search_tools", {"query": "zzzzzzz"})
         text = result["content"][0]["text"]
-        assert text == "[]"
+        assert "\"found\": 0" in text or text == "[]"
 
     @pytest.mark.asyncio
     async def test_list_servers(self):

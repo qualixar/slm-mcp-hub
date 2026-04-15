@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 # Version
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 
 # Network
 DEFAULT_PORT = 52414
@@ -37,7 +37,7 @@ CACHE_MAX_ENTRIES = 1000
 
 # Lifecycle
 IDLE_SHUTDOWN_SECONDS = 1800  # 30 minutes
-MCP_REQUEST_TIMEOUT_MS = 300_000  # 5 minutes
+MCP_REQUEST_TIMEOUT_MS = 1_800_000  # 30 minutes (Gemini deep-research takes 5-20 min)
 
 # Resilience
 REQUEST_BUFFER_MAX = 100

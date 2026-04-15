@@ -162,4 +162,11 @@ def create_app(
             """List all backend MCP servers available via transparent proxy."""
             return {"servers": proxy_endpoint.list_available_servers()}
 
+        @app.post(API_PREFIX + "/servers/{server_name}/reconnect")
+        async def reconnect_server(server_name: str) -> dict[str, Any]:
+            """Reconnect a failed or disconnected MCP server."""
+            conn_manager = proxy_endpoint._conn_manager
+            success, message = await conn_manager.reconnect(server_name)
+            return {"success": success, "server": server_name, "message": message}
+
     return app

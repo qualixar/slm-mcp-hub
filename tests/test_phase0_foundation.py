@@ -116,7 +116,7 @@ def cleanup_hub():
 
 class TestConstants:
     def test_version_set(self):
-        assert VERSION == "0.1.0"
+        assert VERSION == "0.1.2"
 
     def test_default_port(self):
         assert DEFAULT_PORT == 52414

@@ -833,7 +833,7 @@ class TestNetworkDiscovery:
         hub = DiscoveredHub(
             host="macstudio.local.",
             port=52414,
-            version="0.1.0",
+            version="0.1.2",
             mcp_count=38,
             hostname="macstudio",
             address="192.168.1.100",
@@ -887,7 +887,7 @@ class TestNetworkDiscovery:
         listener = _DiscoveryListener()
         mock_zc = MagicMock()
         mock_info = MagicMock()
-        mock_info.properties = {b"version": b"0.1.0", b"mcp_count": b"5", b"hostname": b"testhost"}
+        mock_info.properties = {b"version": b"0.1.2", b"mcp_count": b"5", b"hostname": b"testhost"}
         mock_info.parsed_addresses.return_value = ["192.168.1.10"]
         mock_info.server = "testhost.local."
         mock_info.port = 52414
@@ -898,7 +898,7 @@ class TestNetworkDiscovery:
         assert len(listener.discovered) == 1
         assert listener.discovered[0]["host"] == "testhost.local."
         assert listener.discovered[0]["port"] == 52414
-        assert listener.discovered[0]["version"] == "0.1.0"
+        assert listener.discovered[0]["version"] == "0.1.2"
         assert listener.discovered[0]["mcp_count"] == 5
         assert listener.discovered[0]["address"] == "192.168.1.10"
 
@@ -963,7 +963,7 @@ class TestNetworkDiscovery:
         def fake_browser(zc, stype, listener):
             # Simulate service discovery by populating the listener
             mock_info = MagicMock()
-            mock_info.properties = {b"version": b"0.1.0", b"mcp_count": b"3", b"hostname": b"peer1"}
+            mock_info.properties = {b"version": b"0.1.2", b"mcp_count": b"3", b"hostname": b"peer1"}
             mock_info.parsed_addresses.return_value = ["10.0.0.5"]
             mock_info.server = "peer1.local."
             mock_info.port = 52414
@@ -1174,7 +1174,7 @@ class TestSetupCLI:
             DiscoveredHub(
                 host="macstudio.local.",
                 port=52414,
-                version="0.1.0",
+                version="0.1.2",
                 mcp_count=38,
                 hostname="macstudio",
                 address="192.168.1.100",
@@ -1198,7 +1198,7 @@ class TestSetupCLI:
             DiscoveredHub(
                 host="macstudio.local.",
                 port=52414,
-                version="0.1.0",
+                version="0.1.2",
                 mcp_count=38,
                 hostname="macstudio",
                 address="192.168.1.100",
