@@ -268,7 +268,7 @@ SLM MCP Hub is the **tool brain** — it manages, routes, and learns from MCP to
 | **[SLM Mesh](https://github.com/qualixar/slm-mesh)** | Peer-to-peer agent communication — real-time messaging, file locking, shared state | `npm install slm-mesh` |
 | **SLM MCP Hub** | Intelligent MCP gateway — federation, caching, cost tracking, learning (this repo) | `pip install slm-mcp-hub` |
 | **[Qualixar OS](https://qualixar.com/qualixar-os)** | Universal OS for AI agents — 12 topologies, Forge AI, 24-tab dashboard | `npx qualixar-os` |
-| **[AgentAssert](https://agentassert.com)** | Behavioral contracts for AI agents — ContractSpec DSL, drift detection | `pip install agentassert` |
+| **[AgentAssert](https://agentassert.com)** | Behavioral contracts for AI agents — ContractSpec DSL, drift detection |  `pip install agentassert-abc` |
 | **[AgentAssay](https://pypi.org/project/agentassay/)** | Token-efficient agent evaluation — 78-100% cost reduction, 10 adapters | `pip install agentassay` |
 | **[SkillFortify](https://pypi.org/project/skillfortify/)** | Agent skill security analysis — 100% precision, 22 frameworks, 3 citations | `pip install skillfortify` |
 
@@ -321,7 +321,7 @@ Qualixar is building the open-source infrastructure for AI agent reliability eng
 | **[SLM Mesh](https://github.com/qualixar/slm-mesh)** | P2P coordination across AI agent sessions | `npm i slm-mesh` | — |
 | **[SLM MCP Hub](https://github.com/qualixar/slm-mcp-hub)** | Federate 430+ MCP tools through one gateway | `pip install slm-mcp-hub` | — |
 | **[AgentAssay](https://github.com/qualixar/agentassay)** | Token-efficient AI agent testing | `pip install agentassay` | [arXiv:2603.02601](https://arxiv.org/abs/2603.02601) |
-| **[AgentAssert](https://github.com/qualixar/agentassert-abc)** | Behavioral contracts + drift detection | `pip install agentassert` | [arXiv:2602.22302](https://arxiv.org/abs/2602.22302) |
+| **[AgentAssert](https://github.com/qualixar/agentassert-abc)** | Behavioral contracts + drift detection |  `pip install agentassert-abc` | [arXiv:2602.22302](https://arxiv.org/abs/2602.22302) |
 | **[SkillFortify](https://github.com/qualixar/skillfortify)** | Formal verification for AI agent skills | `pip install skillfortify` | [arXiv:2603.00195](https://arxiv.org/abs/2603.00195) |
 
 **Zero cloud dependency. Local-first. EU AI Act compliant.**
