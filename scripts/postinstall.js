@@ -89,3 +89,11 @@ console.log('    slm-hub start                # Start the hub');
 console.log('');
 console.log('  Docs: https://qualixar.com/slm-mcp-hub');
 console.log('════════════════════════════════════════════════════════════\n');
+
+console.log('────────────────────────────────────────────────────────────');
+console.log('  ⭐ Help us grow!');
+console.log('  If this saves you time, please star the repo:');
+console.log('    https://github.com/qualixar/slm-mcp-hub');
+console.log('  Part of the Qualixar AI Agent Reliability Platform:');
+console.log('    https://qualixar.com  (7 OSS products, 19K+ monthly downloads)');
+console.log('────────────────────────────────────────────────────────────\n');
