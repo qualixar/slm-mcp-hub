@@ -106,7 +106,7 @@ class TestCLI:
         config_path.write_text(json.dumps(config_data))
 
         pid_file = tmp_path / "hub.pid"
-        monkeypatch.setattr("slm_mcp_hub.cli.main.PID_FILE", pid_file)
+        monkeypatch.setattr("slm_mcp_hub.cli.main.get_pid_file", lambda: pid_file)
 
         # Mock asyncio.run to simulate the start command completing
         def mock_asyncio_run(coro):
@@ -126,7 +126,7 @@ class TestCLI:
         config_path.write_text(json.dumps(config_data))
 
         pid_file = tmp_path / "hub.pid"
-        monkeypatch.setattr("slm_mcp_hub.cli.main.PID_FILE", pid_file)
+        monkeypatch.setattr("slm_mcp_hub.cli.main.get_pid_file", lambda: pid_file)
 
         def mock_asyncio_run(coro):
             coro.close()
@@ -141,7 +141,7 @@ class TestCLI:
         """Test status when hub IS running (lines 84-88): PID file exists."""
         pid_file = tmp_path / "hub.pid"
         pid_file.write_text(str(os.getpid()))
-        monkeypatch.setattr("slm_mcp_hub.cli.main.PID_FILE", pid_file)
+        monkeypatch.setattr("slm_mcp_hub.cli.main.get_pid_file", lambda: pid_file)
         monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
 
         result = runner.invoke(cli, ["status"])
@@ -197,7 +197,7 @@ class TestCLI:
         config_path.write_text(json.dumps(config_data))
 
         pid_file = tmp_path / "hub.pid"
-        monkeypatch.setattr("slm_mcp_hub.cli.main.PID_FILE", pid_file)
+        monkeypatch.setattr("slm_mcp_hub.cli.main.get_pid_file", lambda: pid_file)
 
         hub_mock = MagicMock()
         hub_mock.plugins = []
@@ -230,7 +230,7 @@ class TestCLI:
         config_path.write_text(json.dumps(config_data))
 
         pid_file = tmp_path / "hub.pid"
-        monkeypatch.setattr("slm_mcp_hub.cli.main.PID_FILE", pid_file)
+        monkeypatch.setattr("slm_mcp_hub.cli.main.get_pid_file", lambda: pid_file)
 
         hub_mock = MagicMock()
         hub_mock.plugins = []

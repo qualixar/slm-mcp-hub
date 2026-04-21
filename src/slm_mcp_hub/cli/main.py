@@ -18,7 +18,7 @@ from slm_mcp_hub.core.config import (
     load_config,
     save_config,
 )
-from slm_mcp_hub.core.constants import PID_FILE, VERSION, get_config_file
+from slm_mcp_hub.core.constants import VERSION, get_config_file, get_pid_file
 from slm_mcp_hub.core.hub import HubOrchestrator
 from slm_mcp_hub.cli.setup_commands import network, setup
 
@@ -115,8 +115,9 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
             )
 
             # Write PID file
-            PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-            PID_FILE.write_text(str(os.getpid()))
+            pid_file = get_pid_file()
+            pid_file.parent.mkdir(parents=True, exist_ok=True)
+            pid_file.write_text(str(os.getpid()))
 
             # Start uvicorn FIRST — server available immediately
             uvi_config = uvicorn.Config(
@@ -148,8 +149,8 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
                 pass
             finally:
                 await conn_manager.disconnect_all()
-                if PID_FILE.exists():
-                    PID_FILE.unlink()
+                if pid_file.exists():
+                    pid_file.unlink()
 
     try:
         asyncio.run(_run())
@@ -161,7 +162,7 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
 def status() -> None:
     """Show hub status."""
     config_file = get_config_file()
-    if PID_FILE.exists():
+    if get_pid_file().exists():
         click.echo("Hub is running")
         config = load_config()
         click.echo(f"  Port: {config.port}")

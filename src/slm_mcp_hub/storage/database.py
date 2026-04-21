@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from slm_mcp_hub.core.constants import DATABASE_FILE, DATABASE_WAL_MODE
+from slm_mcp_hub.core.constants import DATABASE_WAL_MODE, get_database_file
 from slm_mcp_hub.storage.schema import MIGRATIONS, SCHEMA_VERSION
 
 logger = logging.getLogger(__name__)
@@ -22,7 +22,7 @@ class HubDatabase:
     """
 
     def __init__(self, db_path: Path | None = None) -> None:
-        self._db_path = db_path or DATABASE_FILE
+        self._db_path = db_path or get_database_file()
         self._conn: sqlite3.Connection | None = None
 
     def open(self) -> None:

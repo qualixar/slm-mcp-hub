@@ -11,7 +11,7 @@ import sys
 import textwrap
 from pathlib import Path
 
-from slm_mcp_hub.core.constants import CONFIG_DIR, LOG_FILE, PID_FILE
+from slm_mcp_hub.core.constants import get_log_file, get_pid_file
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +22,7 @@ SYSTEMD_UNIT = "slm-mcp-hub.service"
 def generate_launchd_plist(port: int = 52414) -> str:
     """Generate a macOS launchd plist for auto-restart."""
     slm_hub_bin = _find_binary()
+    log_file = get_log_file()
     return textwrap.dedent(f"""\
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -41,9 +42,9 @@ def generate_launchd_plist(port: int = 52414) -> str:
             <key>RunAtLoad</key>
             <true/>
             <key>StandardOutPath</key>
-            <string>{LOG_FILE}</string>
+            <string>{log_file}</string>
             <key>StandardErrorPath</key>
-            <string>{LOG_FILE}</string>
+            <string>{log_file}</string>
             <key>EnvironmentVariables</key>
             <dict>
                 <key>PATH</key>
@@ -86,24 +87,27 @@ def install_launchd(port: int = 52414) -> Path:
 
 def write_pid_file() -> None:
     """Write current PID to file."""
-    PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-    PID_FILE.write_text(str(os.getpid()))
+    pid_file = get_pid_file()
+    pid_file.parent.mkdir(parents=True, exist_ok=True)
+    pid_file.write_text(str(os.getpid()))
 
 
 def read_pid_file() -> int | None:
     """Read PID from file, or None if not found."""
-    if not PID_FILE.exists():
+    pid_file = get_pid_file()
+    if not pid_file.exists():
         return None
     try:
-        return int(PID_FILE.read_text().strip())
+        return int(pid_file.read_text().strip())
     except (ValueError, OSError):
         return None
 
 
 def remove_pid_file() -> None:
     """Remove PID file if it exists."""
-    if PID_FILE.exists():
-        PID_FILE.unlink()
+    pid_file = get_pid_file()
+    if pid_file.exists():
+        pid_file.unlink()
 
 
 def is_running() -> bool:

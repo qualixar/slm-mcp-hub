@@ -47,15 +47,6 @@ def get_fallback_config_file(config_dir: Path | None = None) -> Path:
 DEFAULT_PORT = 52414
 DEFAULT_HOST = "127.0.0.1"
 
-# Paths
-CONFIG_DIR = get_config_dir()
-CONFIG_FILE = get_config_file(CONFIG_DIR)
-DATABASE_FILE = get_database_file(CONFIG_DIR)
-PID_FILE = get_pid_file(CONFIG_DIR)
-LOG_FILE = get_log_file(CONFIG_DIR)
-PERMISSIONS_FILE = get_permissions_file(CONFIG_DIR)
-FALLBACK_CONFIG_FILE = get_fallback_config_file(CONFIG_DIR)
-
 # Federation
 NAMESPACE_DELIMITER = "__"
 
