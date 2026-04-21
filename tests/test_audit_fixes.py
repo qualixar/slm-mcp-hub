@@ -13,6 +13,7 @@ from click.testing import CliRunner
 
 from slm_mcp_hub.cli.main import cli
 from slm_mcp_hub.core.config import HubConfig, generate_default_config, load_config, save_config
+from slm_mcp_hub.core.constants import VERSION
 from slm_mcp_hub.core.hub import HubOrchestrator, reset_hub
 from slm_mcp_hub.core.registry import CapabilityRegistry
 from slm_mcp_hub.federation.router import FederationRouter, RouteResult
@@ -123,15 +124,16 @@ class TestM3CLICoverage:
         assert result.exit_code == 0
         assert "--port" in result.output
 
-    def test_cli_config_init_new(self, tmp_path):
-        path = tmp_path / "config.json"
+    def test_cli_config_init_new(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
         result = runner.invoke(cli, ["config", "init"], input="y\n")
         assert result.exit_code == 0
 
-    def test_cli_config_import_vscode(self, tmp_path):
+    def test_cli_config_import_vscode(self, tmp_path, monkeypatch):
         vscode = tmp_path / "mcp.json"
         vscode.write_text(json.dumps({"servers": {"test": {"command": "echo", "args": []}}}))
         generate_default_config(tmp_path / "config.json")
+        monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
         result = runner.invoke(cli, ["config", "import", str(vscode), "--format", "vscode"])
         assert result.exit_code == 0
 
@@ -141,11 +143,12 @@ class TestM3CLICoverage:
         result = runner.invoke(cli, ["config", "import", str(unknown)])
         assert result.exit_code == 1
 
-    def test_cli_config_import_already_exists(self, tmp_path):
+    def test_cli_config_import_already_exists(self, tmp_path, monkeypatch):
         claude = tmp_path / "claude.json"
         claude.write_text(json.dumps({"mcpServers": {"test": {"command": "echo", "args": []}}}))
         # Import once
-        generate_default_config()
+        generate_default_config(tmp_path / "config.json")
+        monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
         runner.invoke(cli, ["config", "import", str(claude)])
         # Import again — should say nothing to import
         result = runner.invoke(cli, ["config", "import", str(claude)])

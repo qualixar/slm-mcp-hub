@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from click.testing import CliRunner
 
 from slm_mcp_hub.cli.main import cli, main
+from slm_mcp_hub.core.constants import VERSION
 from slm_mcp_hub.core.hub import reset_hub
 
 
@@ -24,7 +25,7 @@ class TestCLI:
     def test_cli_version(self):
         result = runner.invoke(cli, ["--version"])
         assert result.exit_code == 0
-        assert "0.1.2" in result.output
+        assert VERSION in result.output
 
     def test_cli_status_not_running(self):
         result = runner.invoke(cli, ["status"])
@@ -49,7 +50,7 @@ class TestCLI:
         assert "mcpServers" in data
         assert data["port"] == 52414
 
-    def test_cli_config_import_claude(self, tmp_path):
+    def test_cli_config_import_claude(self, tmp_path, monkeypatch):
         # Create a sample claude.json
         claude_data = {
             "mcpServers": {
@@ -66,23 +67,25 @@ class TestCLI:
         from slm_mcp_hub.core.config import generate_default_config
         hub_config_path = tmp_path / "config.json"
         generate_default_config(hub_config_path)
+        monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
 
         result = runner.invoke(cli, ["config", "import", str(claude_path), "--format", "claude"])
         assert result.exit_code == 0
         assert "1" in result.output  # 1 server imported
 
-    def test_cli_config_import_auto_detect(self, tmp_path):
+    def test_cli_config_import_auto_detect(self, tmp_path, monkeypatch):
         claude_data = {"mcpServers": {"auto-test": {"command": "echo", "args": []}}}
         path = tmp_path / "auto.json"
         path.write_text(json.dumps(claude_data))
 
         from slm_mcp_hub.core.config import generate_default_config
         generate_default_config(tmp_path / "config.json")
+        monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
 
         result = runner.invoke(cli, ["config", "import", str(path)])
         assert result.exit_code == 0
 
-    def test_cli_config_import_auto_detect_vscode(self, tmp_path):
+    def test_cli_config_import_auto_detect_vscode(self, tmp_path, monkeypatch):
         """Auto-detect vscode format when 'servers' key present (line 133)."""
         vscode_data = {"servers": {"vs-srv": {"command": "node", "args": ["server.js"]}}}
         path = tmp_path / "vscode.json"
@@ -90,6 +93,7 @@ class TestCLI:
 
         from slm_mcp_hub.core.config import generate_default_config
         generate_default_config(tmp_path / "config.json")
+        monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
 
         result = runner.invoke(cli, ["config", "import", str(path)])
         assert result.exit_code == 0
@@ -138,9 +142,7 @@ class TestCLI:
         pid_file = tmp_path / "hub.pid"
         pid_file.write_text(str(os.getpid()))
         monkeypatch.setattr("slm_mcp_hub.cli.main.PID_FILE", pid_file)
-        # Patch CONFIG_FILE in both modules
-        monkeypatch.setattr("slm_mcp_hub.cli.main.CONFIG_FILE", tmp_path / "nonexistent.json")
-        monkeypatch.setattr("slm_mcp_hub.core.config.CONFIG_FILE", tmp_path / "nonexistent.json")
+        monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
 
         result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0
@@ -163,8 +165,7 @@ class TestCLI:
         config_path = tmp_path / "config.json"
         config_path.write_text(json.dumps(config_data))
 
-        # Patch CONFIG_FILE in the config module (where load_config reads from)
-        monkeypatch.setattr("slm_mcp_hub.core.config.CONFIG_FILE", config_path)
+        monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
 
         result = runner.invoke(cli, ["config", "show"])
         assert result.exit_code == 0
@@ -175,7 +176,7 @@ class TestCLI:
         """Test config init when config exists and user declines (line 168)."""
         config_path = tmp_path / "config.json"
         config_path.write_text("{}")
-        monkeypatch.setattr("slm_mcp_hub.cli.main.CONFIG_FILE", config_path)
+        monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
 
         # Simulate user saying 'n' to overwrite
         result = runner.invoke(cli, ["config", "init"], input="n\n")
@@ -252,4 +253,3 @@ class TestCLI:
         assert result.exit_code == 0
         call_args = mock_hub_cls.call_args[0][0]
         assert call_args.port == 9999
-

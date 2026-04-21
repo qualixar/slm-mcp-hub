@@ -8,10 +8,13 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
+from slm_mcp_hub.core.constants import VERSION
 from slm_mcp_hub.core.registry import CapabilityRegistry
+from slm_mcp_hub.federation.connection import MCPConnection
 from slm_mcp_hub.federation.router import FederationRouter, RouteResult
 from slm_mcp_hub.server.http_server import create_app
 from slm_mcp_hub.server.mcp_endpoint import MCPEndpoint
+from slm_mcp_hub.server.proxy_endpoint import ProxyEndpoint
 from slm_mcp_hub.session.coordination import SessionCoordinator
 from slm_mcp_hub.session.manager import SessionInfo, SessionManager
 
@@ -363,12 +366,41 @@ class TestHTTPServer:
         )
         return TestClient(app), sm
 
+    def _make_proxy_client(self):
+        reg = CapabilityRegistry()
+        sm = SessionManager()
+        mock_router = AsyncMock(spec=FederationRouter)
+        endpoint = MCPEndpoint(reg, mock_router, sm)
+
+        conn = AsyncMock(spec=MCPConnection)
+        conn.name = "github"
+        conn.is_connected = True
+        conn.capabilities = {
+            "tools": [{"name": "search", "description": "Search", "inputSchema": {}}],
+            "resources": [],
+            "resource_templates": [],
+            "prompts": [],
+        }
+        conn.call_tool = AsyncMock(return_value={"content": [{"type": "text", "text": "proxy-found"}]})
+
+        conn_manager = AsyncMock()
+        conn_manager.connections = {"github": conn}
+        proxy = ProxyEndpoint(conn_manager)
+
+        app = create_app(
+            mcp_endpoint=endpoint,
+            session_manager=sm,
+            hub_status_fn=lambda: {"state": "ready", "uptime_seconds": 42},
+            proxy_endpoint=proxy,
+        )
+        return TestClient(app), conn
+
     def test_health(self):
         client, _ = self._make_client()
         resp = client.get("/api/health")
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
-        assert resp.json()["version"] == "0.1.2"
+        assert resp.json()["version"] == VERSION
         assert resp.json()["state"] == "ready"
 
     def test_status(self):
@@ -489,3 +521,21 @@ class TestHTTPServer:
         resp = client.get("/api/health")
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
+
+    def test_proxy_tools_list(self):
+        client, _ = self._make_proxy_client()
+        resp = client.post("/mcp/github", json={
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
+        })
+        assert resp.status_code == 200
+        assert resp.json()["result"]["tools"][0]["name"] == "search"
+
+    def test_proxy_tools_call(self):
+        client, conn = self._make_proxy_client()
+        resp = client.post("/mcp/github", json={
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "search", "arguments": {"q": "qualixar"}},
+        })
+        assert resp.status_code == 200
+        assert resp.json()["result"]["content"][0]["text"] == "proxy-found"
+        conn.call_tool.assert_awaited_once_with("search", {"q": "qualixar"})

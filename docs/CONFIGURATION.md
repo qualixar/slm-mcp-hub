@@ -19,7 +19,7 @@ Override with: `SLM_HUB_CONFIG_DIR` environment variable
   "cache_max_entries": 1000,
   "idle_shutdown_seconds": 1800,
   "cors_origins": ["http://127.0.0.1", "http://localhost"],
-  "plugins_enabled": [],  // v0.2.0: SLM + Mesh plugins (not yet available)
+  "plugins_enabled": [],
   "mcpServers": {
     "context7": {
       "command": "npx",

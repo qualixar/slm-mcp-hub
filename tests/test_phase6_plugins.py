@@ -14,6 +14,7 @@ import httpx
 import pytest
 
 from slm_mcp_hub.core.config import HubConfig
+from slm_mcp_hub.core.constants import VERSION
 from slm_mcp_hub.core.hub import HubOrchestrator, reset_hub
 from slm_mcp_hub.plugins.base import HubPlugin
 from slm_mcp_hub.plugins.mesh_plugin import (
@@ -157,7 +158,7 @@ class _ModifyingPlugin(HubPlugin):
 class TestSLMPlugin:
     def test_name_and_version(self, slm_plugin: SLMPlugin) -> None:
         assert slm_plugin.name == "slm"
-        assert slm_plugin.version == "0.1.2"
+        assert slm_plugin.version == VERSION
 
     def test_not_available_initially(self, slm_plugin: SLMPlugin) -> None:
         assert slm_plugin.available is False
@@ -470,7 +471,7 @@ class TestSLMPluginAvailable:
 class TestMeshPlugin:
     def test_name_and_version(self, mesh_plugin: MeshPlugin) -> None:
         assert mesh_plugin.name == "mesh"
-        assert mesh_plugin.version == "0.1.2"
+        assert mesh_plugin.version == VERSION
 
     def test_not_available_initially(self, mesh_plugin: MeshPlugin) -> None:
         assert mesh_plugin.available is False

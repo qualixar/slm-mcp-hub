@@ -18,7 +18,7 @@ from slm_mcp_hub.core.config import (
     load_config,
     save_config,
 )
-from slm_mcp_hub.core.constants import CONFIG_FILE, PID_FILE, VERSION
+from slm_mcp_hub.core.constants import PID_FILE, VERSION, get_config_file
 from slm_mcp_hub.core.hub import HubOrchestrator
 from slm_mcp_hub.cli.setup_commands import network, setup
 
@@ -160,12 +160,13 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
 @cli.command()
 def status() -> None:
     """Show hub status."""
+    config_file = get_config_file()
     if PID_FILE.exists():
         click.echo("Hub is running")
         config = load_config()
         click.echo(f"  Port: {config.port}")
         click.echo(f"  MCP servers configured: {len(config.mcp_servers)}")
-        click.echo(f"  Config: {CONFIG_FILE}")
+        click.echo(f"  Config: {config_file}")
     else:
         click.echo("Hub is not running")
         click.echo(f"  Start with: slm-hub start")
@@ -265,12 +266,13 @@ def config_import(file_path: Path, fmt: str) -> None:
 def config_init() -> None:
     """Generate default configuration file."""
     _setup_logging("WARNING")
-    if CONFIG_FILE.exists():
-        click.echo(f"Config already exists at {CONFIG_FILE}")
+    config_file = get_config_file()
+    if config_file.exists():
+        click.echo(f"Config already exists at {config_file}")
         if not click.confirm("Overwrite?"):
             return
-    generate_default_config()
-    click.echo(f"Default config created at {CONFIG_FILE}")
+    generate_default_config(config_file)
+    click.echo(f"Default config created at {config_file}")
 
 
 cli.add_command(setup)

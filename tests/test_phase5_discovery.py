@@ -11,7 +11,7 @@ from click.testing import CliRunner
 
 from slm_mcp_hub.cli.main import cli
 from slm_mcp_hub.core.config import save_config, HubConfig, MCPServerConfig
-from slm_mcp_hub.core.constants import DEFAULT_PORT
+from slm_mcp_hub.core.constants import DEFAULT_PORT, VERSION
 from slm_mcp_hub.discovery.auto_register import (
     AutoRegister,
     ImportResult,
@@ -19,6 +19,7 @@ from slm_mcp_hub.discovery.auto_register import (
     RegistrationResult,
     _ensure_section,
     _get_section_readonly,
+    _transparent_proxy_base_url,
 )
 from slm_mcp_hub.discovery.client_detector import (
     ClientConfig,
@@ -833,7 +834,7 @@ class TestNetworkDiscovery:
         hub = DiscoveredHub(
             host="macstudio.local.",
             port=52414,
-            version="0.1.2",
+            version=VERSION,
             mcp_count=38,
             hostname="macstudio",
             address="192.168.1.100",
@@ -887,7 +888,7 @@ class TestNetworkDiscovery:
         listener = _DiscoveryListener()
         mock_zc = MagicMock()
         mock_info = MagicMock()
-        mock_info.properties = {b"version": b"0.1.2", b"mcp_count": b"5", b"hostname": b"testhost"}
+        mock_info.properties = {b"version": VERSION.encode(), b"mcp_count": b"5", b"hostname": b"testhost"}
         mock_info.parsed_addresses.return_value = ["192.168.1.10"]
         mock_info.server = "testhost.local."
         mock_info.port = 52414
@@ -898,7 +899,7 @@ class TestNetworkDiscovery:
         assert len(listener.discovered) == 1
         assert listener.discovered[0]["host"] == "testhost.local."
         assert listener.discovered[0]["port"] == 52414
-        assert listener.discovered[0]["version"] == "0.1.2"
+        assert listener.discovered[0]["version"] == VERSION
         assert listener.discovered[0]["mcp_count"] == 5
         assert listener.discovered[0]["address"] == "192.168.1.10"
 
@@ -963,7 +964,7 @@ class TestNetworkDiscovery:
         def fake_browser(zc, stype, listener):
             # Simulate service discovery by populating the listener
             mock_info = MagicMock()
-            mock_info.properties = {b"version": b"0.1.2", b"mcp_count": b"3", b"hostname": b"peer1"}
+            mock_info.properties = {b"version": VERSION.encode(), b"mcp_count": b"3", b"hostname": b"peer1"}
             mock_info.parsed_addresses.return_value = ["10.0.0.5"]
             mock_info.server = "peer1.local."
             mock_info.port = 52414
@@ -1174,7 +1175,7 @@ class TestSetupCLI:
             DiscoveredHub(
                 host="macstudio.local.",
                 port=52414,
-                version="0.1.2",
+                version=VERSION,
                 mcp_count=38,
                 hostname="macstudio",
                 address="192.168.1.100",
@@ -1198,7 +1199,7 @@ class TestSetupCLI:
             DiscoveredHub(
                 host="macstudio.local.",
                 port=52414,
-                version="0.1.2",
+                version=VERSION,
                 mcp_count=38,
                 hostname="macstudio",
                 address="192.168.1.100",
@@ -1263,6 +1264,45 @@ class TestSetupCLI:
             assert result.exit_code == 0
             assert "registered" in result.output
             assert "backup" in result.output
+
+    def test_setup_register_help_shows_mode(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(cli, ["setup", "register", "--help"])
+        assert result.exit_code == 0
+        assert "--mode" in result.output
+
+    def test_setup_register_transparent_success(self, tmp_claude_config: Path) -> None:
+        clients = (
+            DetectedClient(
+                name="claude_code",
+                display_name="Claude Code",
+                config_path=tmp_claude_config,
+                mcp_count=3,
+                hub_registered=False,
+                config_format="claude",
+            ),
+        )
+        mock_result = RegistrationResult(
+            success=True,
+            client_name="claude_code",
+            config_path=tmp_claude_config,
+            backup_path=tmp_claude_config.parent / ".claude.json.pre-hub-backup",
+        )
+        runner = CliRunner()
+        with (
+            patch.object(ClientDetector, "detect_all", return_value=clients),
+            patch.object(AutoRegister, "list_server_names", return_value=("context7", "gemini", "sqlite")),
+            patch.object(AutoRegister, "register_transparent", return_value=mock_result) as register_transparent,
+        ):
+            result = runner.invoke(cli, ["setup", "register", "--all", "--mode", "transparent"])
+            assert result.exit_code == 0
+            assert "registered" in result.output
+            register_transparent.assert_called_once()
+
+    def test_transparent_proxy_base_url(self) -> None:
+        assert _transparent_proxy_base_url("http://127.0.0.1:52414/mcp") == "http://127.0.0.1:52414"
+        assert _transparent_proxy_base_url("http://127.0.0.1:52414/mcp////") == "http://127.0.0.1:52414"
+        assert _transparent_proxy_base_url("http://127.0.0.1:52414/cmp") == "http://127.0.0.1:52414/cmp"
 
     def test_setup_register_already_registered(self, tmp_claude_config: Path) -> None:
         """setup register --all shows 'already registered' for existing hub."""

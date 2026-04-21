@@ -10,6 +10,7 @@ import click
 
 from slm_mcp_hub.core.constants import DEFAULT_PORT
 from slm_mcp_hub.discovery.auto_register import AutoRegister, RegistrationPlan
+from slm_mcp_hub.discovery.client_detector import DetectedClient
 from slm_mcp_hub.discovery.client_detector import ClientDetector
 from slm_mcp_hub.discovery.network import (
     SERVICE_TYPE,
@@ -59,11 +60,19 @@ def setup_detect(as_json: bool) -> None:
 @setup.command("register")
 @click.option("--client", "client_name", default=None, help="Register a specific client")
 @click.option("--url", "hub_url", default=None, help="Hub URL to register")
+@click.option(
+    "--mode",
+    type=click.Choice(["federated", "transparent"]),
+    default="federated",
+    show_default=True,
+    help="Register one hub entry or replace each server with a transparent proxy entry.",
+)
 @click.option("--dry-run", is_flag=True, help="Show what would change without modifying")
 @click.option("--all", "register_all", is_flag=True, help="Register with all detected clients")
 def setup_register(
     client_name: str | None,
     hub_url: str | None,
+    mode: str,
     dry_run: bool,
     register_all: bool,
 ) -> None:
@@ -85,15 +94,35 @@ def setup_register(
         return
 
     for client in targets:
+        mcp_key = _mcp_key_for(client)
         if dry_run:
-            plan = registrar.plan(client)
-            _display_plan(plan)
+            if mode == "transparent":
+                server_names = registrar.list_server_names(client, mcp_key=mcp_key)
+                click.echo(
+                    f"  {client.display_name}: replace {len(server_names)} server(s) "
+                    f"with transparent proxy entries via {registrar.hub_url}"
+                )
+            else:
+                plan = registrar.plan(client)
+                _display_plan(plan)
         else:
-            result = registrar.register(
-                client,
-                mcp_key=_mcp_key_for(client),
-                dry_run=False,
-            )
+            if mode == "transparent":
+                server_names = registrar.list_server_names(client, mcp_key=mcp_key)
+                if not server_names:
+                    click.echo(f"  {client.display_name}: FAILED — no MCP servers found to proxy")
+                    continue
+                result = registrar.register_transparent(
+                    client,
+                    list(server_names),
+                    mcp_key=mcp_key,
+                    dry_run=False,
+                )
+            else:
+                result = registrar.register(
+                    client,
+                    mcp_key=mcp_key,
+                    dry_run=False,
+                )
             if hasattr(result, "success"):
                 if result.success:
                     if result.error == "already_registered":

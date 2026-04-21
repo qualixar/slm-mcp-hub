@@ -9,6 +9,7 @@ import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from slm_mcp_hub.core.config import (
     MCPServerConfig,
@@ -59,6 +60,16 @@ class ImportResult:
 def _build_hub_entry(hub_url: str) -> dict[str, Any]:
     """Build the hub MCP entry for any client config."""
     return {"type": "http", "url": hub_url}
+
+
+def _transparent_proxy_base_url(hub_url: str) -> str:
+    """Convert a federated hub URL to its transparent-proxy base URL."""
+    parsed = urlsplit(hub_url)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/mcp"):
+        path = path[:-4]
+    path = path.rstrip("/")
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -229,6 +240,16 @@ class AutoRegister:
             backup_path=backup_path,
         )
 
+    def list_server_names(
+        self,
+        client: DetectedClient,
+        mcp_key: str = "mcpServers",
+    ) -> tuple[str, ...]:
+        """List MCP server names currently configured for a client."""
+        data = _read_json(client.config_path)
+        servers = _get_section_readonly(data, mcp_key)
+        return tuple(name for name in servers if name != HUB_ENTRY_NAME)
+
     def unregister(
         self,
         client: DetectedClient,
@@ -301,7 +322,7 @@ class AutoRegister:
         )
 
         # Build new MCP entries: each server → HTTP to hub's per-server endpoint
-        base_url = self._hub_url.rstrip("/mcp").rstrip("/")
+        base_url = _transparent_proxy_base_url(self._hub_url)
         new_servers: dict[str, Any] = {}
         for name in server_names:
             new_servers[name] = {

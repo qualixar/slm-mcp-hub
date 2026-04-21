@@ -19,6 +19,8 @@ Or via npm:
 npm install -g slm-mcp-hub
 ```
 
+The npm package is a thin wrapper around the Python app. You still need Python 3.11+ available.
+
 ## Step 1: Initialize
 
 ```bash
@@ -50,7 +52,7 @@ slm-hub start
 
 You'll see:
 ```
-SLM MCP Hub v0.1.0 running on http://127.0.0.1:52414/mcp
+SLM MCP Hub v0.1.5 running on http://127.0.0.1:52414/mcp
   MCP servers: 36/36 connected
   Tools: 313
   Plugins: 2 (slm, mesh)
@@ -116,7 +118,7 @@ slm start   # Start the daemon
 The hub discovers the SLM daemon at `localhost:8765` on startup. No configuration needed:
 
 ```
-SLM MCP Hub v0.1.0 running on http://127.0.0.1:52414/mcp
+SLM MCP Hub v0.1.5 running on http://127.0.0.1:52414/mcp
   MCP servers: 37/37 connected
   Tools: 345
   Plugins: 2 (slm, mesh)

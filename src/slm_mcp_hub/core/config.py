@@ -13,13 +13,13 @@ from typing import Any
 from slm_mcp_hub.core.constants import (
     CACHE_DEFAULT_TTL_SECONDS,
     CACHE_MAX_ENTRIES,
-    CONFIG_DIR,
-    CONFIG_FILE,
     DEFAULT_HOST,
     DEFAULT_PORT,
     IDLE_SHUTDOWN_SECONDS,
     MAX_SESSIONS,
     SESSION_TIMEOUT_SECONDS,
+    get_config_dir,
+    get_config_file,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,7 +48,7 @@ class HubConfig:
 
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
-    config_dir: Path = CONFIG_DIR
+    config_dir: Path = field(default_factory=get_config_dir)
     mcp_servers: tuple[MCPServerConfig, ...] = ()
     session_timeout_seconds: int = SESSION_TIMEOUT_SECONDS
     max_sessions: int = MAX_SESSIONS
@@ -123,7 +123,7 @@ def parse_mcp_server(name: str, raw: dict[str, Any]) -> MCPServerConfig:
 
 def load_config(config_path: Path | None = None) -> HubConfig:
     """Load hub configuration from file, with env var overrides."""
-    path = config_path or CONFIG_FILE
+    path = config_path or get_config_file()
 
     if not path.exists():
         logger.info("No config file found at %s, using defaults", path)
@@ -140,7 +140,7 @@ def load_config(config_path: Path | None = None) -> HubConfig:
     config = HubConfig(
         host=raw.get("host", DEFAULT_HOST),
         port=raw.get("port", DEFAULT_PORT),
-        config_dir=Path(raw.get("config_dir", str(CONFIG_DIR))),
+        config_dir=Path(raw.get("config_dir", str(get_config_dir()))),
         mcp_servers=servers,
         session_timeout_seconds=raw.get("session_timeout_seconds", SESSION_TIMEOUT_SECONDS),
         max_sessions=raw.get("max_sessions", MAX_SESSIONS),
@@ -160,14 +160,20 @@ def _apply_env_overrides(config: HubConfig) -> HubConfig:
     port = int(os.environ.get("SLM_HUB_PORT", config.port))
     host = os.environ.get("SLM_HUB_HOST", config.host)
     log_level = os.environ.get("SLM_HUB_LOG_LEVEL", config.log_level)
+    config_dir = Path(os.environ.get("SLM_HUB_CONFIG_DIR", str(config.config_dir)))
 
-    if port == config.port and host == config.host and log_level == config.log_level:
+    if (
+        port == config.port
+        and host == config.host
+        and log_level == config.log_level
+        and config_dir == config.config_dir
+    ):
         return config
 
     return HubConfig(
         host=host,
         port=port,
-        config_dir=config.config_dir,
+        config_dir=config_dir,
         mcp_servers=config.mcp_servers,
         session_timeout_seconds=config.session_timeout_seconds,
         max_sessions=config.max_sessions,
@@ -200,7 +206,7 @@ def import_vscode_config(vscode_json_path: Path) -> list[MCPServerConfig]:
 
 def save_config(config: HubConfig, config_path: Path | None = None) -> None:
     """Save hub configuration to JSON file."""
-    path = config_path or CONFIG_FILE
+    path = config_path or get_config_file(config.config_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
 
     servers_dict = {}
@@ -227,6 +233,7 @@ def save_config(config: HubConfig, config_path: Path | None = None) -> None:
     data = {
         "host": config.host,
         "port": config.port,
+        "config_dir": str(config.config_dir),
         "mcpServers": servers_dict,
         "session_timeout_seconds": config.session_timeout_seconds,
         "max_sessions": config.max_sessions,
@@ -246,6 +253,7 @@ def save_config(config: HubConfig, config_path: Path | None = None) -> None:
 
 def generate_default_config(config_path: Path | None = None) -> HubConfig:
     """Generate and save a default configuration file."""
-    config = HubConfig()
+    config_dir = config_path.parent if config_path is not None else get_config_dir()
+    config = HubConfig(config_dir=config_dir)
     save_config(config, config_path)
     return config

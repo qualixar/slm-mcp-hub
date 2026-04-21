@@ -6,20 +6,55 @@ import os
 from pathlib import Path
 
 # Version
-VERSION = "0.1.2"
+VERSION = "0.1.5"
+
+
+def get_config_dir() -> Path:
+    """Resolve the active hub config directory."""
+    return Path(os.environ.get("SLM_HUB_CONFIG_DIR", Path.home() / ".slm-mcp-hub"))
+
+
+def get_config_file(config_dir: Path | None = None) -> Path:
+    """Resolve the hub config file path."""
+    return (config_dir or get_config_dir()) / "config.json"
+
+
+def get_database_file(config_dir: Path | None = None) -> Path:
+    """Resolve the hub database path."""
+    return (config_dir or get_config_dir()) / "hub.db"
+
+
+def get_pid_file(config_dir: Path | None = None) -> Path:
+    """Resolve the hub pid file path."""
+    return (config_dir or get_config_dir()) / "hub.pid"
+
+
+def get_log_file(config_dir: Path | None = None) -> Path:
+    """Resolve the hub log file path."""
+    return (config_dir or get_config_dir()) / "hub.log"
+
+
+def get_permissions_file(config_dir: Path | None = None) -> Path:
+    """Resolve the hub permissions file path."""
+    return (config_dir or get_config_dir()) / "permissions.json"
+
+
+def get_fallback_config_file(config_dir: Path | None = None) -> Path:
+    """Resolve the fallback config file path."""
+    return (config_dir or get_config_dir()) / "fallback-config.json"
 
 # Network
 DEFAULT_PORT = 52414
 DEFAULT_HOST = "127.0.0.1"
 
 # Paths
-CONFIG_DIR = Path(os.environ.get("SLM_HUB_CONFIG_DIR", Path.home() / ".slm-mcp-hub"))
-CONFIG_FILE = CONFIG_DIR / "config.json"
-DATABASE_FILE = CONFIG_DIR / "hub.db"
-PID_FILE = CONFIG_DIR / "hub.pid"
-LOG_FILE = CONFIG_DIR / "hub.log"
-PERMISSIONS_FILE = CONFIG_DIR / "permissions.json"
-FALLBACK_CONFIG_FILE = CONFIG_DIR / "fallback-config.json"
+CONFIG_DIR = get_config_dir()
+CONFIG_FILE = get_config_file(CONFIG_DIR)
+DATABASE_FILE = get_database_file(CONFIG_DIR)
+PID_FILE = get_pid_file(CONFIG_DIR)
+LOG_FILE = get_log_file(CONFIG_DIR)
+PERMISSIONS_FILE = get_permissions_file(CONFIG_DIR)
+FALLBACK_CONFIG_FILE = get_fallback_config_file(CONFIG_DIR)
 
 # Federation
 NAMESPACE_DELIMITER = "__"

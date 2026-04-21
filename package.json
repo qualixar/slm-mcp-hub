@@ -36,7 +36,7 @@
   },
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
-    "test": "echo \"Run: slm-hub status\" && exit 0"
+    "test": "node scripts/run-python-test.js"
   },
   "engines": {
     "node": ">=14.0.0",

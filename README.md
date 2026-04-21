@@ -67,6 +67,9 @@ Hub:     Routes to GitHub MCP → returns real results
 # Install
 pip install slm-mcp-hub
 
+# npm wrapper (still requires Python 3.11+)
+npm install -g slm-mcp-hub
+
 # Initialize and import your MCPs
 slm-hub config init
 slm-hub setup import ~/.claude.json
@@ -99,7 +102,7 @@ Restart Claude Code. All tools available through `hub__search_tools` and `hub__c
 When [SuperLocalMemory](https://superlocalmemory.com) is running, the hub **automatically** connects to it and learns from every tool call. No configuration needed.
 
 ```
-SLM MCP Hub v0.1.0 running on http://127.0.0.1:52414/mcp
+SLM MCP Hub v0.1.5 running on http://127.0.0.1:52414/mcp
   MCP servers: 37/37 connected
   Tools: 345
   Plugins: 2 (slm, mesh)         ← Auto-discovered
@@ -158,7 +161,7 @@ The mesh plugin uses the SLM daemon's mesh HTTP API at `localhost:8765/mesh/*`. 
 
 ---
 
-## What Works Today (v0.1.0)
+## What Works Today (v0.1.5)
 
 | Feature | Status |
 |:--------|:-------|
