@@ -198,12 +198,84 @@ def import_vscode_config(vscode_json_path: Path) -> list[MCPServerConfig]:
     return [parse_mcp_server(name, cfg) for name, cfg in servers_raw.items()]
 
 
-def save_config(config: HubConfig, config_path: Path | None = None) -> None:
+SNAPSHOTS_DIR = CONFIG_DIR / "snapshots"
+MAX_SNAPSHOTS = 50
+DROP_GUARD_THRESHOLD = 0.7  # refuse save if MCP count drops below 70% of current
+
+
+def _snapshot_existing(path: Path) -> Path | None:
+    """Snapshot existing config to versioned file before overwriting.
+
+    Skips snapshot if existing config is empty/trivial (< 3 MCPs) — no point
+    in keeping useless snapshots that bloat the snapshot dir.
+
+    Returns snapshot path if created, None otherwise.
+    """
+    if not path.exists():
+        return None
+
+    # Don't snapshot trivial configs
+    try:
+        with open(path) as f:
+            existing = json.load(f)
+        existing_count = len(existing.get("mcpServers", existing.get("servers", {})))
+        if existing_count < 3:
+            return None  # not worth snapshotting
+    except (json.JSONDecodeError, OSError):
+        return None  # corrupt file, can't snapshot meaningfully
+
+    SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    import time
+    ts = time.strftime("%Y%m%d-%H%M%S")
+    snap_path = SNAPSHOTS_DIR / f"config-{ts}-{existing_count}mcps.json"
+
+    import shutil
+    shutil.copy2(path, snap_path)
+
+    # Prune old snapshots — keep MAX_SNAPSHOTS newest
+    snaps = sorted(SNAPSHOTS_DIR.glob("config-*.json"))
+    while len(snaps) > MAX_SNAPSHOTS:
+        snaps[0].unlink(missing_ok=True)
+        snaps = snaps[1:]
+
+    return snap_path
+
+
+def _atomic_write(path: Path, data: dict) -> None:
+    """Write JSON atomically via temp file + rename.
+
+    Validates JSON parses before rename. If anything fails, original file
+    is untouched.
+    """
+    import os
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+
+    try:
+        with open(tmp_path, "w") as f:
+            json.dump(data, f, indent=2)
+
+        # Verify the file we just wrote parses back identically
+        with open(tmp_path) as f:
+            verify = json.load(f)
+        if verify.get("mcpServers", {}) != data.get("mcpServers", {}):
+            raise RuntimeError("Atomic write verification failed: mcpServers mismatch")
+
+        os.replace(tmp_path, path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+
+def save_config(config: HubConfig, config_path: Path | None = None, force: bool = False) -> None:
     """Save hub configuration to JSON file.
 
-    SAFETY GUARD: When running under pytest, refuses to write to the real
-    user config (~/.slm-mcp-hub/config.json) without an explicit path arg.
-    Prevents tests from nuking the user's MCP configuration.
+    Defenses (in order):
+    1. PYTEST guard — refuses to write real user config during pytest.
+    2. COUNT-DROP guard — refuses if new MCP count < 70% of existing (unless force=True).
+    3. SNAPSHOT — versioned backup written to ~/.slm-mcp-hub/snapshots/ before overwrite.
+    4. ATOMIC WRITE — write to .tmp, validate, rename.
     """
     import os
     path = config_path or CONFIG_FILE
@@ -217,6 +289,28 @@ def save_config(config: HubConfig, config_path: Path | None = None) -> None:
                 "This guard prevents the April 26 incident where tests "
                 "nuked 39 MCP server configurations."
             )
+
+    # COUNT-DROP GUARD — refuse catastrophic shrinkage unless forced
+    new_count = len(config.mcp_servers)
+    if path.exists() and not force:
+        try:
+            with open(path) as f:
+                existing = json.load(f)
+            existing_count = len(existing.get("mcpServers", existing.get("servers", {})))
+            if existing_count > 5 and new_count < int(existing_count * DROP_GUARD_THRESHOLD):
+                raise RuntimeError(
+                    f"REFUSING to save: MCP count would drop from {existing_count} to {new_count} "
+                    f"(>{int((1-DROP_GUARD_THRESHOLD)*100)}% loss). "
+                    f"Pass force=True or use 'slm-hub config restore' if this is unintended. "
+                    f"Snapshots: {SNAPSHOTS_DIR}"
+                )
+        except (json.JSONDecodeError, OSError):
+            pass  # corrupt existing file — let save proceed
+
+    # SNAPSHOT existing before overwriting
+    snap = _snapshot_existing(path)
+    if snap:
+        logger.info("Snapshot saved: %s", snap)
 
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -255,10 +349,46 @@ def save_config(config: HubConfig, config_path: Path | None = None) -> None:
         "plugins_enabled": list(config.plugins_enabled),
     }
 
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-
+    _atomic_write(path, data)
     logger.info("Config saved to %s (%d MCP servers)", path, len(config.mcp_servers))
+
+
+def list_snapshots() -> list[dict[str, Any]]:
+    """List all config snapshots, newest first."""
+    if not SNAPSHOTS_DIR.exists():
+        return []
+    out = []
+    for snap in sorted(SNAPSHOTS_DIR.glob("config-*.json"), reverse=True):
+        try:
+            with open(snap) as f:
+                d = json.load(f)
+            mcp_count = len(d.get("mcpServers", d.get("servers", {})))
+        except (json.JSONDecodeError, OSError):
+            mcp_count = -1
+        out.append({
+            "path": snap,
+            "name": snap.name,
+            "mcp_count": mcp_count,
+            "size": snap.stat().st_size,
+        })
+    return out
+
+
+def restore_snapshot(snapshot_name: str, target: Path | None = None) -> Path:
+    """Restore a snapshot to the live config path. Returns the restored path."""
+    snap = SNAPSHOTS_DIR / snapshot_name
+    if not snap.exists():
+        raise FileNotFoundError(f"Snapshot not found: {snap}")
+
+    target = target or CONFIG_FILE
+
+    # Snapshot the current state before restoring (so restore is reversible)
+    _snapshot_existing(target)
+
+    import shutil
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(snap, target)
+    return target
 
 
 def generate_default_config(config_path: Path | None = None) -> HubConfig:

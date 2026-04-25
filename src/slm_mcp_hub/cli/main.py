@@ -335,6 +335,35 @@ def config_init() -> None:
     click.echo(f"Default config created at {CONFIG_FILE}")
 
 
+@config.command("snapshots")
+def config_snapshots() -> None:
+    """List all config snapshots (auto-saved before every change)."""
+    from slm_mcp_hub.core.config import list_snapshots, SNAPSHOTS_DIR
+    snaps = list_snapshots()
+    if not snaps:
+        click.echo(f"No snapshots in {SNAPSHOTS_DIR}")
+        return
+    click.echo(f"Snapshots in {SNAPSHOTS_DIR} (newest first):")
+    for s in snaps:
+        click.echo(f"  {s['name']:<35} {s['mcp_count']:>3} MCPs  {s['size']:>6} bytes")
+    click.echo(f"\nRestore with: slm-hub config restore <snapshot-name>")
+
+
+@config.command("restore")
+@click.argument("snapshot_name")
+def config_restore(snapshot_name: str) -> None:
+    """Restore a config snapshot. Current config is auto-snapshotted first."""
+    from slm_mcp_hub.core.config import restore_snapshot
+    try:
+        target = restore_snapshot(snapshot_name)
+        click.echo(f"Restored {snapshot_name} -> {target}")
+        click.echo("Restart the hub for the change to take effect:")
+        click.echo("  launchctl kickstart -k gui/$(id -u)/com.qualixar.slm-mcp-hub")
+    except FileNotFoundError as exc:
+        click.echo(f"Error: {exc}")
+        click.echo(f"List available with: slm-hub config snapshots")
+
+
 cli.add_command(setup)
 cli.add_command(network)
 
