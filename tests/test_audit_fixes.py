@@ -123,8 +123,10 @@ class TestM3CLICoverage:
         assert result.exit_code == 0
         assert "--port" in result.output
 
-    def test_cli_config_init_new(self, tmp_path):
+    def test_cli_config_init_new(self, tmp_path, monkeypatch):
         path = tmp_path / "config.json"
+        monkeypatch.setattr("slm_mcp_hub.cli.main.CONFIG_FILE", path)
+        monkeypatch.setattr("slm_mcp_hub.core.config.CONFIG_FILE", path)
         result = runner.invoke(cli, ["config", "init"], input="y\n")
         assert result.exit_code == 0
 
@@ -141,13 +143,16 @@ class TestM3CLICoverage:
         result = runner.invoke(cli, ["config", "import", str(unknown)])
         assert result.exit_code == 1
 
-    def test_cli_config_import_already_exists(self, tmp_path):
+    def test_cli_config_import_already_exists(self, tmp_path, monkeypatch):
+        """Import idempotency — second import says nothing new."""
+        config_path = tmp_path / "config.json"
+        monkeypatch.setattr("slm_mcp_hub.cli.main.CONFIG_FILE", config_path)
+        monkeypatch.setattr("slm_mcp_hub.core.config.CONFIG_FILE", config_path)
+
         claude = tmp_path / "claude.json"
-        claude.write_text(json.dumps({"mcpServers": {"test": {"command": "echo", "args": []}}}))
-        # Import once
-        generate_default_config()
+        claude.write_text(json.dumps({"mcpServers": {"sample": {"command": "echo", "args": []}}}))
+        generate_default_config(config_path)
         runner.invoke(cli, ["config", "import", str(claude)])
-        # Import again — should say nothing to import
         result = runner.invoke(cli, ["config", "import", str(claude)])
         assert "Nothing to import" in result.output or "already" in result.output.lower()
 

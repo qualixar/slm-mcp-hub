@@ -199,8 +199,25 @@ def import_vscode_config(vscode_json_path: Path) -> list[MCPServerConfig]:
 
 
 def save_config(config: HubConfig, config_path: Path | None = None) -> None:
-    """Save hub configuration to JSON file."""
+    """Save hub configuration to JSON file.
+
+    SAFETY GUARD: When running under pytest, refuses to write to the real
+    user config (~/.slm-mcp-hub/config.json) without an explicit path arg.
+    Prevents tests from nuking the user's MCP configuration.
+    """
+    import os
     path = config_path or CONFIG_FILE
+
+    if "PYTEST_CURRENT_TEST" in os.environ:
+        real_user_config = (Path.home() / ".slm-mcp-hub" / "config.json").resolve()
+        if path.resolve() == real_user_config:
+            raise RuntimeError(
+                f"REFUSING to overwrite real user config {path} during pytest. "
+                "Tests must monkeypatch CONFIG_FILE or pass an explicit config_path. "
+                "This guard prevents the April 26 incident where tests "
+                "nuked 39 MCP server configurations."
+            )
+
     path.parent.mkdir(parents=True, exist_ok=True)
 
     servers_dict = {}
