@@ -27,6 +27,7 @@ def create_app(
     cors_origins: tuple[str, ...] = ("*",),
     hub_status_fn: Any = None,
     proxy_endpoint: ProxyEndpoint | None = None,
+    registry: Any = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -107,6 +108,41 @@ def create_app(
             "status": "ok",
             "version": VERSION,
             **status,
+        }
+
+    @app.get(f"{API_PREFIX}/session-greeting")
+    async def session_greeting() -> dict[str, Any]:
+        """Tool inventory for session initialization.
+
+        Returns a compact summary of available servers and tool categories
+        that can be injected into Claude session context at startup.
+        """
+        hub_info = hub_status_fn() if hub_status_fn else {}
+        tool_list = registry.list_tools() if registry else []
+
+        servers: dict[str, list[str]] = {}
+        for tool_def in tool_list:
+            name = tool_def.get("name", "")
+            if "__" in name:
+                server, tool_name = name.split("__", 1)
+                servers.setdefault(server, []).append(tool_name)
+
+        server_summary = {
+            srv: {"tool_count": len(tools), "tools": tools[:5]}
+            for srv, tools in sorted(servers.items())
+        }
+
+        return {
+            "hub_version": VERSION,
+            "state": hub_info.get("state", "unknown"),
+            "total_servers": len(servers),
+            "total_tools": len(tool_list),
+            "invocation": {
+                "search": 'hub__search_tools(query="keyword")',
+                "call": 'hub__call_tool(tool="server__tool_name", arguments={...})',
+                "list": "hub__list_servers()",
+            },
+            "servers": server_summary,
         }
 
     @app.get(f"{API_PREFIX}/status")

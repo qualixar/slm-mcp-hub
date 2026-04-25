@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 from unittest.mock import AsyncMock
 
+from slm_mcp_hub.core.constants import VERSION
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -368,7 +370,7 @@ class TestHTTPServer:
         resp = client.get("/api/health")
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
-        assert resp.json()["version"] == "0.1.2"
+        assert resp.json()["version"] == VERSION
         assert resp.json()["state"] == "ready"
 
     def test_status(self):

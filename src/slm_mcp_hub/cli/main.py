@@ -68,19 +68,67 @@ def cli() -> None:
     """SLM MCP Hub — The World's First MCP Gateway That Learns."""
 
 
+def _kill_existing_hub(config_host: str, config_port: int) -> None:
+    """Kill any existing hub process — PID file + port check. Prevents zombies."""
+    import signal
+    import socket
+    import time
+    from slm_mcp_hub.resilience.watchdog import is_running, read_pid_file, remove_pid_file
+
+    if is_running():
+        old_pid = read_pid_file()
+        click.echo(f"  Killing existing hub (PID {old_pid})...")
+        try:
+            os.kill(old_pid, signal.SIGTERM)
+            for _ in range(20):
+                time.sleep(0.25)
+                try:
+                    os.kill(old_pid, 0)
+                except ProcessLookupError:
+                    break
+            else:
+                os.kill(old_pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    remove_pid_file()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        if sock.connect_ex((config_host, config_port)) == 0:
+            import subprocess
+            result = subprocess.run(
+                ["lsof", "-ti", f":{config_port}"],
+                capture_output=True, text=True,
+            )
+            for pid_str in result.stdout.strip().split("\n"):
+                if pid_str.strip():
+                    orphan_pid = int(pid_str.strip())
+                    if orphan_pid != os.getpid():
+                        click.echo(f"  Killing orphan on port {config_port} (PID {orphan_pid})...")
+                        try:
+                            os.kill(orphan_pid, signal.SIGTERM)
+                            time.sleep(1)
+                            os.kill(orphan_pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+    finally:
+        sock.close()
+
+
 @cli.command()
 @click.option("--port", type=int, default=None, help="Port to listen on")
 @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("--log-level", default="INFO", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]))
 def start(port: int | None, config_path: Path | None, log_level: str) -> None:
-    """Start the hub server."""
+    """Start the hub server. Kills any existing hub first."""
     _setup_logging(log_level)
     _load_secrets()
     config = load_config(config_path)
 
     if port:
-        # Create new config with overridden port (immutable)
         config = replace(config, port=port)
+
+    _kill_existing_hub(config.host, config.port)
 
     async def _run() -> None:
         import uvicorn
@@ -94,7 +142,6 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
         from slm_mcp_hub.session.manager import SessionManager
 
         async with HubOrchestrator(config) as hub:
-            # Wire subsystems
             registry = CapabilityRegistry()
             conn_manager = ConnectionManager(config, registry)
 
@@ -112,13 +159,12 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
                 cors_origins=config.cors_origins,
                 hub_status_fn=hub.get_status,
                 proxy_endpoint=proxy,
+                registry=registry,
             )
 
-            # Write PID file
             PID_FILE.parent.mkdir(parents=True, exist_ok=True)
             PID_FILE.write_text(str(os.getpid()))
 
-            # Start uvicorn FIRST — server available immediately
             uvi_config = uvicorn.Config(
                 app,
                 host=config.host,
@@ -127,24 +173,21 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
             )
             server = uvicorn.Server(uvi_config)
 
-            click.echo(f"SLM MCP Hub v{VERSION} starting on http://{config.host}:{config.port}/mcp")
-            click.echo(f"  Configured: {len(config.mcp_servers)} MCP servers")
-            click.echo(f"  Plugins: {len(hub.plugins)}")
-            click.echo("  Connecting to MCP servers in background...")
+            click.echo(f"SLM MCP Hub v{VERSION} on http://{config.host}:{config.port}/mcp")
+            click.echo(f"  Configured: {len(config.mcp_servers)} MCP servers, {len(hub.plugins)} plugins")
 
-            # Connect MCPs in background — server is already accepting requests
             async def _connect_mcps_background() -> None:
                 failed = await conn_manager.connect_all()
-                click.echo(f"  MCP servers: {conn_manager.connected_count}/{len(config.mcp_servers)} connected, {registry.tool_count} tools")
+                click.echo(f"  Connected: {conn_manager.connected_count}/{len(config.mcp_servers)} servers, {registry.tool_count} tools")
                 if failed:
                     for name, err in failed.items():
-                        click.echo(f"  WARNING: {name} failed: {err}")
+                        click.echo(f"  WARNING: {name}: {err}")
 
-            bg_task = asyncio.create_task(_connect_mcps_background())
+            asyncio.create_task(_connect_mcps_background())
 
             try:
-                await server.serve()  # pragma: no cover — blocking server loop
-            except asyncio.CancelledError:  # pragma: no cover
+                await server.serve()
+            except asyncio.CancelledError:
                 pass
             finally:
                 await conn_manager.disconnect_all()
@@ -159,16 +202,35 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
 
 @cli.command()
 def status() -> None:
-    """Show hub status."""
-    if PID_FILE.exists():
-        click.echo("Hub is running")
+    """Show hub status with actual process health check."""
+    from slm_mcp_hub.resilience.watchdog import is_running, read_pid_file
+
+    if is_running():
+        pid = read_pid_file()
         config = load_config()
-        click.echo(f"  Port: {config.port}")
-        click.echo(f"  MCP servers configured: {len(config.mcp_servers)}")
-        click.echo(f"  Config: {CONFIG_FILE}")
+
+        import httpx
+        try:
+            resp = httpx.get(
+                f"http://{config.host}:{config.port}/api/health",
+                timeout=5.0,
+            )
+            health = resp.json()
+            click.echo(f"Hub is running (PID {pid})")
+            click.echo(f"  Version: {health.get('version', 'unknown')}")
+            click.echo(f"  Port: {config.port}")
+            click.echo(f"  State: {health.get('state', 'unknown')}")
+            click.echo(f"  Uptime: {health.get('uptime_seconds', 0):.0f}s")
+            click.echo(f"  MCP servers: {health.get('mcp_servers_configured', '?')}")
+            click.echo(f"  Config: {CONFIG_FILE}")
+        except httpx.ConnectError:
+            click.echo(f"Hub PID {pid} exists but HTTP endpoint is unreachable")
+            click.echo(f"  Port {config.port} not responding — hub may have crashed")
+            click.echo(f"  Restart with: slm-hub start")
     else:
         click.echo("Hub is not running")
         click.echo(f"  Start with: slm-hub start")
+        click.echo(f"  Install daemon: slm-hub daemon install")
 
 
 @cli.command()
@@ -275,6 +337,128 @@ def config_init() -> None:
 
 cli.add_command(setup)
 cli.add_command(network)
+
+
+@cli.group()
+def daemon() -> None:
+    """Process supervision — auto-restart on crash."""
+
+
+@daemon.command("install")
+@click.option("--port", type=int, default=None, help="Port for the hub (default from config)")
+def daemon_install(port: int | None) -> None:
+    """Install launchd plist (macOS) for auto-restart on crash/boot."""
+    import platform
+    if platform.system() != "Darwin":
+        click.echo("Launchd is macOS-only. Use systemd on Linux:")
+        from slm_mcp_hub.resilience.watchdog import generate_systemd_unit
+        cfg = load_config()
+        click.echo(generate_systemd_unit(port or cfg.port))
+        return
+
+    from slm_mcp_hub.resilience.watchdog import install_launchd, LAUNCHD_LABEL
+    import subprocess
+
+    cfg = load_config()
+    plist_path = install_launchd(port or cfg.port)
+    click.echo(f"Plist written: {plist_path}")
+
+    subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+    result = subprocess.run(["launchctl", "load", "-w", str(plist_path)], capture_output=True, text=True)
+
+    if result.returncode == 0:
+        click.echo(f"Daemon installed and loaded: {LAUNCHD_LABEL}")
+        click.echo("Hub will auto-start on boot and restart on crash.")
+    else:
+        click.echo(f"launchctl load failed: {result.stderr}")
+        click.echo(f"Manual load: launchctl load -w {plist_path}")
+
+
+@daemon.command("uninstall")
+def daemon_uninstall() -> None:
+    """Remove launchd plist and stop the daemon."""
+    from slm_mcp_hub.resilience.watchdog import LAUNCHD_LABEL
+    import subprocess
+
+    plist_path = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+    if not plist_path.exists():
+        click.echo("Daemon not installed.")
+        return
+
+    subprocess.run(["launchctl", "unload", str(plist_path)], capture_output=True)
+    plist_path.unlink()
+    click.echo(f"Daemon uninstalled: {LAUNCHD_LABEL}")
+
+
+@daemon.command("status")
+def daemon_status() -> None:
+    """Check if the daemon is installed and running."""
+    from slm_mcp_hub.resilience.watchdog import LAUNCHD_LABEL, is_running, read_pid_file
+    import subprocess
+
+    plist_path = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
+    installed = plist_path.exists()
+
+    result = subprocess.run(
+        ["launchctl", "list", LAUNCHD_LABEL],
+        capture_output=True, text=True,
+    )
+    loaded = result.returncode == 0
+
+    running = is_running()
+    pid = read_pid_file()
+
+    click.echo(f"Plist installed: {'yes' if installed else 'no'}")
+    click.echo(f"Launchd loaded:  {'yes' if loaded else 'no'}")
+    click.echo(f"Process running: {'yes' if running else 'no'}{f' (PID {pid})' if pid else ''}")
+
+    if not installed:
+        click.echo("\nInstall with: slm-hub daemon install")
+    elif not loaded:
+        click.echo(f"\nLoad with: launchctl load -w {plist_path}")
+
+
+@cli.command("tools")
+@click.option("--query", "-q", default="", help="Search tools by keyword")
+def tools_cmd(query: str) -> None:
+    """List available tools from the running hub."""
+    import httpx
+
+    config = load_config()
+    try:
+        if query:
+            resp = httpx.post(
+                f"http://{config.host}:{config.port}/mcp",
+                json={
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "hub__search_tools", "arguments": {"query": query}},
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=30.0,
+            )
+        else:
+            resp = httpx.post(
+                f"http://{config.host}:{config.port}/mcp",
+                json={
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": "hub__list_servers", "arguments": {}},
+                },
+                headers={"Content-Type": "application/json"},
+                timeout=30.0,
+            )
+
+        data = resp.json()
+        result = data.get("result", {})
+        content = result.get("content", [])
+        for block in content:
+            if block.get("type") == "text":
+                click.echo(block["text"])
+    except httpx.ConnectError:
+        click.echo("Hub is not running. Start with: slm-hub start")
+    except Exception as exc:
+        click.echo(f"Error: {exc}")
 
 
 def main() -> None:

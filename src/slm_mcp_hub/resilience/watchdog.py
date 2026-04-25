@@ -20,8 +20,14 @@ SYSTEMD_UNIT = "slm-mcp-hub.service"
 
 
 def generate_launchd_plist(port: int = 52414) -> str:
-    """Generate a macOS launchd plist for auto-restart."""
+    """Generate a macOS launchd plist for auto-restart.
+
+    Bulletproof: kills old process before starting (via start command),
+    throttles restarts to 10s minimum interval, includes full PATH + HOME.
+    """
     slm_hub_bin = _find_binary()
+    home = str(Path.home())
+    current_path = os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin")
     return textwrap.dedent(f"""\
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -35,19 +41,27 @@ def generate_launchd_plist(port: int = 52414) -> str:
                 <string>start</string>
                 <string>--port</string>
                 <string>{port}</string>
+                <string>--log-level</string>
+                <string>WARNING</string>
             </array>
             <key>KeepAlive</key>
             <true/>
             <key>RunAtLoad</key>
             <true/>
+            <key>ThrottleInterval</key>
+            <integer>10</integer>
             <key>StandardOutPath</key>
             <string>{LOG_FILE}</string>
             <key>StandardErrorPath</key>
             <string>{LOG_FILE}</string>
+            <key>WorkingDirectory</key>
+            <string>{home}</string>
             <key>EnvironmentVariables</key>
             <dict>
                 <key>PATH</key>
-                <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+                <string>{current_path}</string>
+                <key>HOME</key>
+                <string>{home}</string>
             </dict>
         </dict>
         </plist>
