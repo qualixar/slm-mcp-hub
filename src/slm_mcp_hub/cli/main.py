@@ -170,6 +170,8 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
                 host=config.host,
                 port=config.port,
                 log_level=config.log_level.lower(),
+                timeout_keep_alive=300,
+                timeout_graceful_shutdown=30,
             )
             server = uvicorn.Server(uvi_config)
 
