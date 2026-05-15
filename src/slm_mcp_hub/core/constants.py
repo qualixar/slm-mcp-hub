@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 # Version
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 # Network
 DEFAULT_PORT = 52414

@@ -5,6 +5,22 @@ All notable changes to SLM MCP Hub will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-05-15
+
+### Documentation
+- Confirmed that MCP servers exposing both `X-API-KEY` header auth AND OAuth Bearer (e.g. Gamma's `https://mcp.gamma.app/mcp`) can be federated through the hub today via the existing per-server `headers` configuration. No new code required:
+
+  ```json
+  "gamma": {"type": "http", "url": "https://mcp.gamma.app/mcp", "headers": {"X-API-KEY": "<your-key>"}}
+  ```
+
+  After updating `config.json`, run `slm-hub server reload` to hot-add without restarting the hub.
+
+Full OAuth-DCR (RFC 9728 / RFC 7591 / PKCE) federation for MCPs that *only* support OAuth Bearer (no API-key bypass) is a separate v0.3.0 feature.
+
+### Fixed
+- Minor: cosmetic cleanups in connection error messages and `add_server` / `reconnect` response strings.
+
 ## [0.2.0] - 2026-05-15
 
 ### Added — Lifecycle & Transport
