@@ -21,6 +21,7 @@ from slm_mcp_hub.core.config import (
 from slm_mcp_hub.core.constants import CONFIG_FILE, PID_FILE, VERSION
 from slm_mcp_hub.core.hub import HubOrchestrator
 from slm_mcp_hub.cli.setup_commands import network, setup
+from slm_mcp_hub.cli.server_commands import server as server_group
 
 
 SECRETS_PATHS = (
@@ -54,11 +55,15 @@ def _load_secrets() -> None:
             pass
 
 
-def _setup_logging(level: str) -> None:
+def _setup_logging(level: str, *, stderr_only: bool = False) -> None:
+    """Configure logging. When stderr_only=True (stdio transport mode), all
+    log output is forced to stderr so stdout stays NDJSON-only."""
+    stream = sys.stderr if stderr_only else None
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         datefmt="%H:%M:%S",
+        stream=stream,
     )
 
 
@@ -133,33 +138,21 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
     async def _run() -> None:
         import uvicorn
 
-        from slm_mcp_hub.core.registry import CapabilityRegistry
-        from slm_mcp_hub.federation.manager import ConnectionManager
-        from slm_mcp_hub.federation.router import FederationRouter
+        from slm_mcp_hub.lifecycle.runtime import HubRuntime
         from slm_mcp_hub.server.http_server import create_app
-        from slm_mcp_hub.server.mcp_endpoint import MCPEndpoint
-        from slm_mcp_hub.server.proxy_endpoint import ProxyEndpoint
-        from slm_mcp_hub.session.manager import SessionManager
 
         async with HubOrchestrator(config) as hub:
-            registry = CapabilityRegistry()
-            conn_manager = ConnectionManager(config, registry)
-
-            router = FederationRouter(registry, conn_manager.connections)
-            session_manager = SessionManager(
-                max_sessions=config.max_sessions,
-                timeout_seconds=config.session_timeout_seconds,
-            )
-            mcp_endpoint = MCPEndpoint(registry, router, session_manager, hub=hub)
-            proxy = ProxyEndpoint(conn_manager, hub=hub)
+            runtime = HubRuntime(hub)
 
             app = create_app(
-                mcp_endpoint=mcp_endpoint,
-                session_manager=session_manager,
+                mcp_endpoint=runtime.mcp_endpoint,
+                session_manager=runtime.session_manager,
                 cors_origins=config.cors_origins,
                 hub_status_fn=hub.get_status,
-                proxy_endpoint=proxy,
-                registry=registry,
+                proxy_endpoint=runtime.proxy,
+                registry=runtime.registry,
+                reloader=runtime.reloader,
+                conn_manager=runtime.conn_manager,
             )
 
             PID_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -179,11 +172,17 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
             click.echo(f"  Configured: {len(config.mcp_servers)} MCP servers, {len(hub.plugins)} plugins")
 
             async def _connect_mcps_background() -> None:
-                failed = await conn_manager.connect_all()
-                click.echo(f"  Connected: {conn_manager.connected_count}/{len(config.mcp_servers)} servers, {registry.tool_count} tools")
+                failed = await runtime.connect_all()
+                click.echo(f"  Connected: {runtime.conn_manager.connected_count}/{len(config.mcp_servers)} servers, {runtime.registry.tool_count} tools")
+                # Fast cold-start retries (0.5s, 1.5s, 4.5s) for transient failures
+                # like child processes that need extra startup time.
                 if failed:
-                    for name, err in failed.items():
-                        click.echo(f"  WARNING: {name}: {err}")
+                    still_failed = await runtime.conn_manager.fast_retry_failed()
+                    if still_failed:
+                        for name, err in still_failed.items():
+                            click.echo(f"  WARNING: {name}: {err}")
+                    else:
+                        click.echo(f"  Connected after retries: {runtime.conn_manager.connected_count}/{len(config.mcp_servers)} servers, {runtime.registry.tool_count} tools")
 
             asyncio.create_task(_connect_mcps_background())
 
@@ -192,7 +191,7 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
             except asyncio.CancelledError:
                 pass
             finally:
-                await conn_manager.disconnect_all()
+                await runtime.disconnect_all()
                 if PID_FILE.exists():
                     PID_FILE.unlink()
 
@@ -202,9 +201,64 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
         click.echo("\nHub stopped.")
 
 
+@cli.command("mcp")
+@click.option("--log-level", default="WARNING", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]))
+def mcp_stdio(log_level: str) -> None:
+    """Serve MCP JSON-RPC over stdin/stdout (NDJSON framing).
+
+    For native integration with Claude Desktop and other stdio-only MCP
+    clients. Federates the same MCP servers as `slm-hub start`, but
+    transport is stdin/stdout instead of HTTP.
+
+    DISCIPLINE: stdout is reserved for JSON-RPC frames. All logging
+    goes to stderr. Default log level is WARNING (quiet) to avoid
+    noise on stderr unless something goes wrong.
+    """
+    # stdio mode REQUIRES stderr-only logging — stdout is for JSON-RPC.
+    _setup_logging(log_level, stderr_only=True)
+    _load_secrets()
+    config = load_config()
+
+    async def _run_stdio() -> None:
+        from slm_mcp_hub.lifecycle.runtime import HubRuntime
+        from slm_mcp_hub.server.stdio_server import StdioServer
+
+        async with HubOrchestrator(config) as hub:
+            runtime = HubRuntime(hub)
+
+            # Connect federated MCPs in the background — first client request
+            # may arrive before they're all up, that's fine, hub__list_servers
+            # will reflect current state.
+            asyncio.create_task(runtime.connect_all())
+
+            stdio_server = StdioServer(
+                mcp_endpoint=runtime.mcp_endpoint,
+                session_manager=runtime.session_manager,
+                notifier=runtime.notifier,
+            )
+
+            try:
+                await stdio_server.serve()
+            except asyncio.CancelledError:
+                pass
+            finally:
+                await runtime.disconnect_all()
+
+    try:
+        asyncio.run(_run_stdio())
+    except KeyboardInterrupt:
+        # Don't print anything — stdout is sacred.
+        pass
+
+
 @cli.command()
-def status() -> None:
-    """Show hub status with actual process health check."""
+@click.option("-v", "--verbose", is_flag=True, help="Show per-server connection detail")
+def status(verbose: bool) -> None:
+    """Show hub status with actual process health check.
+
+    With --verbose, fetches /api/servers/detail and shows per-server
+    configured / connected / tools / last-error.
+    """
     from slm_mcp_hub.resilience.watchdog import is_running, read_pid_file
 
     if is_running():
@@ -225,6 +279,34 @@ def status() -> None:
             click.echo(f"  Uptime: {health.get('uptime_seconds', 0):.0f}s")
             click.echo(f"  MCP servers: {health.get('mcp_servers_configured', '?')}")
             click.echo(f"  Config: {CONFIG_FILE}")
+
+            if verbose:
+                try:
+                    detail_resp = httpx.get(
+                        f"http://{config.host}:{config.port}/api/servers/detail",
+                        timeout=5.0,
+                    )
+                    servers = detail_resp.json().get("servers", [])
+                    if servers:
+                        click.echo("\n  Per-server detail:")
+                        click.echo(f"    {'NAME':<28} {'TRANSPORT':<8} {'STATUS':<12} {'TOOLS':>6}")
+                        for s in servers:
+                            if not s["enabled"]:
+                                status_str = "disabled"
+                            elif s["connected"]:
+                                status_str = "connected"
+                            elif s.get("error"):
+                                status_str = "failed"
+                            else:
+                                status_str = "pending"
+                            click.echo(
+                                f"    {s['name']:<28} {s['transport']:<8} "
+                                f"{status_str:<12} {s['tools']:>6}"
+                            )
+                            if s.get("error") and not s["connected"]:
+                                click.echo(f"      └─ {s['error']}")
+                except Exception as exc:
+                    click.echo(f"  (verbose fetch failed: {exc})")
         except httpx.ConnectError:
             click.echo(f"Hub PID {pid} exists but HTTP endpoint is unreachable")
             click.echo(f"  Port {config.port} not responding — hub may have crashed")
@@ -368,6 +450,7 @@ def config_restore(snapshot_name: str) -> None:
 
 cli.add_command(setup)
 cli.add_command(network)
+cli.add_command(server_group)
 
 
 @cli.group()

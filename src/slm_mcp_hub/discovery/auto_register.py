@@ -56,8 +56,29 @@ class ImportResult:
     total_in_source: int
 
 
-def _build_hub_entry(hub_url: str) -> dict[str, Any]:
-    """Build the hub MCP entry for any client config."""
+def _build_hub_entry(
+    hub_url: str,
+    *,
+    transport: str = "http",
+    command: str = "slm-hub",
+    args: tuple[str, ...] = ("mcp",),
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Build the hub MCP entry for any client config.
+
+    For HTTP transport (default — works for Claude Code, VS Code Copilot,
+    Cursor, Windsurf, Codex CLI): {"type": "http", "url": hub_url}.
+
+    For stdio transport (Claude Desktop and any future stdio-only client):
+    {"command": "slm-hub", "args": ["mcp"], "env": {...}}. The client
+    spawns `slm-hub mcp` as a subprocess and talks NDJSON over its
+    stdin/stdout — no Node bridge, no localhost binding.
+    """
+    if transport == "stdio":
+        entry: dict[str, Any] = {"command": command, "args": list(args)}
+        if env:
+            entry["env"] = dict(env)
+        return entry
     return {"type": "http", "url": hub_url}
 
 
@@ -132,17 +153,43 @@ def _get_section_readonly(data: dict[str, Any], mcp_key: str) -> dict[str, Any]:
 class AutoRegister:
     """Register and unregister hub in AI client configurations."""
 
-    def __init__(self, hub_url: str | None = None) -> None:
+    def __init__(
+        self,
+        hub_url: str | None = None,
+        *,
+        transport: str = "http",
+        stdio_command: str = "slm-hub",
+        stdio_args: tuple[str, ...] = ("mcp",),
+        stdio_env: dict[str, str] | None = None,
+    ) -> None:
         self._hub_url = hub_url or f"http://127.0.0.1:{DEFAULT_PORT}/mcp"
+        self._transport = transport
+        self._stdio_command = stdio_command
+        self._stdio_args = stdio_args
+        self._stdio_env = stdio_env
 
     @property
     def hub_url(self) -> str:
         return self._hub_url
 
+    @property
+    def transport(self) -> str:
+        return self._transport
+
+    def _entry(self) -> dict[str, Any]:
+        """Build the hub entry for this AutoRegister's transport mode."""
+        return _build_hub_entry(
+            self._hub_url,
+            transport=self._transport,
+            command=self._stdio_command,
+            args=self._stdio_args,
+            env=self._stdio_env,
+        )
+
     def plan(self, client: DetectedClient) -> RegistrationPlan:
         """Generate a registration plan without modifying anything."""
         backup_path = client.config_path.parent / (client.config_path.name + ".pre-hub-backup")
-        hub_entry = _build_hub_entry(self._hub_url)
+        hub_entry = self._entry()
 
         return RegistrationPlan(
             client_name=client.name,
@@ -197,7 +244,7 @@ class AutoRegister:
 
         # Inject hub entry (immutable — creates new dict)
         updated_data = _inject_hub_entry(
-            data, mcp_key, HUB_ENTRY_NAME, _build_hub_entry(self._hub_url)
+            data, mcp_key, HUB_ENTRY_NAME, self._entry()
         )
 
         try:

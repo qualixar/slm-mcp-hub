@@ -28,6 +28,8 @@ def create_app(
     hub_status_fn: Any = None,
     proxy_endpoint: ProxyEndpoint | None = None,
     registry: Any = None,
+    reloader: Any = None,
+    conn_manager: Any = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -204,5 +206,40 @@ def create_app(
             conn_manager = proxy_endpoint._conn_manager
             success, message = await conn_manager.reconnect(server_name)
             return {"success": success, "server": server_name, "message": message}
+
+    # ── Lifecycle (Phase 3+4) ──────────────────────────────────────
+
+    if conn_manager is not None:
+        @app.get(f"{API_PREFIX}/servers/detail")
+        async def servers_detail() -> dict[str, Any]:
+            """Per-server detail: configured | connected | tools | error."""
+            return {"servers": conn_manager.get_server_status()}
+
+    if reloader is not None:
+        @app.post(f"{API_PREFIX}/reload")
+        async def reload_config() -> dict[str, Any]:
+            """Re-read config.json from disk and apply the diff via reloader.
+
+            Single source of truth for the live hub state is the on-disk
+            config.json. CLI commands edit the file, then POST here.
+            """
+            from slm_mcp_hub.core.config import load_config
+            from slm_mcp_hub.lifecycle.reloader import ReloadError
+            try:
+                new_config = load_config()
+                diff = await reloader.apply_config(new_config)
+                return {
+                    "success": True,
+                    "summary": diff.summary(),
+                    "added": [s.name for s in diff.added],
+                    "removed": list(diff.removed),
+                    "modified": [s.name for s in diff.modified],
+                    "unchanged": list(diff.unchanged),
+                }
+            except ReloadError as exc:
+                return {"success": False, "error": str(exc)}
+            except Exception as exc:
+                logger.exception("Reload crashed")
+                return {"success": False, "error": str(exc)}
 
     return app

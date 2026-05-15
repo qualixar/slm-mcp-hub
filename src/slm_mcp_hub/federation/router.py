@@ -57,9 +57,20 @@ class FederationRouter:
             )
 
         conn = self._connections.get(cap.server_name)
-        if conn is None or not conn.is_connected:
+        if conn is None:
             return RouteResult(
-                result={"content": [{"type": "text", "text": f"Server not connected: {cap.server_name}"}], "isError": True},
+                result={"content": [{"type": "text", "text": f"Server not configured: {cap.server_name}"}], "isError": True},
+                server_name=cap.server_name,
+                tool_name=cap.original_name,
+                duration_ms=0,
+                success=False,
+            )
+        if not conn.is_connected:
+            # Distinguish draining (hot-remove in progress) vs plain disconnected
+            is_draining = getattr(conn, "is_draining", False) is True
+            msg = f"Server is shutting down: {cap.server_name}" if is_draining else f"Server not connected: {cap.server_name}"
+            return RouteResult(
+                result={"content": [{"type": "text", "text": msg}], "isError": True},
                 server_name=cap.server_name,
                 tool_name=cap.original_name,
                 duration_ms=0,

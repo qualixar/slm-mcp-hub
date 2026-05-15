@@ -5,6 +5,51 @@ All notable changes to SLM MCP Hub will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-05-15
+
+### Added — Lifecycle & Transport
+
+#### Zero-restart hot-reload
+- `slm-hub server add <name> [--command ... | --type http --url ...]` — adds and connects an MCP server without restarting the hub.
+- `slm-hub server remove <name>` — drains in-flight tool calls (30s default), then disconnects and deregisters.
+- `slm-hub server modify <name> [--env K=V] [--arg ARG] [--command ... | --url ...] [--enabled/--disabled]` — restarts a single server in-place after a config change.
+- `slm-hub server list [--show-tools]` — lists configured servers with live connection status.
+- `slm-hub server reload` — re-reads `config.json` from disk and applies the diff.
+- `slm-hub server status [<name>]` — per-server detail or single-server lookup.
+- New `lifecycle/` module: `config_diff`, `notifier`, `reloader`, `runtime`, drain semantics.
+- MCP `notifications/tools/list_changed` is now emitted to subscribed clients within ≤1s of any registry change (debounced).
+- Atomic config swap with `asyncio.Lock` — concurrent reload triggers serialize; invalid configs preserve current state.
+
+#### Native stdio transport
+- New `slm-hub mcp` command serves MCP JSON-RPC over stdin/stdout using NDJSON framing.
+- Enables native Claude Desktop integration without a Node bridge — same federation, just stdin/stdout instead of HTTP.
+- All logging routed to stderr in stdio mode; stdout is reserved for JSON-RPC frames.
+- Session attribution via `SLM_HUB_AGENT_ID` env var.
+
+#### Setup & discovery improvements
+- `slm-hub setup detect` now finds Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS).
+- `slm-hub setup register --client claude-desktop` writes a native stdio entry (`{"command": "slm-hub", "args": ["mcp"]}`) instead of an HTTP entry.
+
+#### Status & observability
+- `slm-hub status --verbose` shows per-server connected/disabled/failed state with last-error message.
+- New `/api/servers/detail` endpoint exposes per-server lifecycle state via HTTP.
+- New `/api/reload` endpoint triggers config reload from disk.
+
+### Fixed
+- `MCPEndpoint.initialize` correctly emits `notifications/tools/list_changed` (previously advertised `listChanged: True` but never sent notifications).
+- `disconnect()` no longer raises `ProcessLookupError` when terminating a child process that already exited.
+- Reader EOF now fails pending futures with `ConnectionError` immediately instead of hanging forever.
+- Child process stderr is now drained to prevent pipe-buffer deadlock under verbose stdio MCPs.
+- `disconnect_one()` now correctly removes the server entry from the live connection map.
+- `asyncio.Lock` added around all `ConnectionManager` mutations to prevent registry-sync races.
+
+### Changed
+- Cold start now retries failed connections with a fast 0.5s/1.5s/4.5s schedule before falling back to the slower background retry loop.
+- README and PyPI description updated to reflect new "first MCP gateway that learns, hot-reloads, and serves both stdio + HTTP natively" positioning.
+
+### Backward compatibility
+- `slm-hub start` HTTP transport continues to work identically. No config schema changes. All v0.1.x clients continue to work without modification.
+
 ## [0.1.0] - 2026-04-15
 
 ### Added

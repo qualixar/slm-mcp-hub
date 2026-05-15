@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+from collections import deque
 from enum import Enum
 from typing import Any
 
@@ -20,6 +21,7 @@ class ConnectionState(str, Enum):
     DISCONNECTED = "disconnected"
     CONNECTING = "connecting"
     CONNECTED = "connected"
+    DRAINING = "draining"
     ERROR = "error"
 
 
@@ -43,7 +45,17 @@ class MCPConnection:
         self._request_id = 0
         self._pending: dict[int, asyncio.Future[dict]] = {}
         self._reader_task: asyncio.Task | None = None
+        self._stderr_task: asyncio.Task | None = None
         self._connected_at: float = 0.0
+        self._in_flight: int = 0
+        self._drain_event: asyncio.Event | None = None
+        # Serializes drain_and_disconnect calls per connection — prevents
+        # concurrent drains from overwriting each other's _drain_event
+        # and hanging the first caller until timeout.
+        self._drain_lock: asyncio.Lock | None = None
+        # Rolling tail of recent stderr lines for diagnostic error messages
+        # when a child process exits unexpectedly.
+        self._stderr_tail: deque[str] = deque(maxlen=20)
 
     @property
     def name(self) -> str:
@@ -60,6 +72,14 @@ class MCPConnection:
     @property
     def is_connected(self) -> bool:
         return self._state == ConnectionState.CONNECTED
+
+    @property
+    def is_draining(self) -> bool:
+        return self._state == ConnectionState.DRAINING
+
+    @property
+    def in_flight_count(self) -> int:
+        return self._in_flight
 
     @property
     def uptime_seconds(self) -> float:
@@ -89,12 +109,27 @@ class MCPConnection:
                 pass
             self._reader_task = None
 
+        if self._stderr_task and not self._stderr_task.done():
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
+            except asyncio.CancelledError:
+                pass
+            self._stderr_task = None
+
         if self._process:
             try:
                 self._process.terminate()
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except (asyncio.TimeoutError, ProcessLookupError):
-                self._process.kill()
+            except ProcessLookupError:
+                # Process already exited — nothing to do
+                pass
+            except asyncio.TimeoutError:
+                # Force-kill, but tolerate the race where the kid just died
+                try:
+                    self._process.kill()
+                except ProcessLookupError:
+                    pass
             self._process = None
 
         # Close HTTP client if present
@@ -114,6 +149,43 @@ class MCPConnection:
         self._state = ConnectionState.DISCONNECTED
         self._connected_at = 0.0
         logger.info("Disconnected from MCP: %s", self.name)
+
+    async def drain_and_disconnect(self, timeout_s: float = 30.0) -> None:
+        """Stop accepting new requests, wait for in-flight calls, then disconnect.
+
+        Serialized per connection via _drain_lock so concurrent callers don't
+        overwrite each other's drain event. The second caller simply waits
+        for the first to complete, then sees state=DISCONNECTED and returns.
+
+        Keeps kite SSE sessions alive — drain only affects this one server's
+        connection, not the hub's other connections.
+        """
+        if self._drain_lock is None:
+            self._drain_lock = asyncio.Lock()
+
+        async with self._drain_lock:
+            # After acquiring the lock, re-check state in case a prior drain
+            # already disconnected us.
+            if self._state not in (ConnectionState.CONNECTED, ConnectionState.DRAINING):
+                await self.disconnect()
+                return
+
+            self._state = ConnectionState.DRAINING
+            if self._in_flight > 0:
+                self._drain_event = asyncio.Event()
+                logger.info(
+                    "Draining %s: %d in-flight calls, waiting up to %.0fs",
+                    self.name, self._in_flight, timeout_s,
+                )
+                try:
+                    await asyncio.wait_for(self._drain_event.wait(), timeout=timeout_s)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        "Drain timeout for %s after %.0fs — forcing disconnect with %d in-flight",
+                        self.name, timeout_s, self._in_flight,
+                    )
+
+            await self.disconnect()
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Call a tool on this MCP server and return the result."""
@@ -157,8 +229,10 @@ class MCPConnection:
             self._state = ConnectionState.ERROR
             raise ConnectionError(f"Failed to start MCP {self.name}: {exc}")
 
-        # Start reading stdout
+        # Start reading stdout (JSON-RPC responses)
         self._reader_task = asyncio.create_task(self._read_stdout())
+        # Drain stderr to prevent child process blocking on full pipe buffer
+        self._stderr_task = asyncio.create_task(self._drain_stderr())
 
         # MCP initialization handshake
         try:
@@ -267,6 +341,8 @@ class MCPConnection:
 
     async def _send_request_stdio(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         """Send via stdio subprocess."""
+        if self._state == ConnectionState.DRAINING:
+            raise ConnectionError(f"MCP {self.name} is draining — no new requests accepted")
         if not self._process or not self._process.stdin:
             raise ConnectionError(f"MCP {self.name} not connected")
 
@@ -282,6 +358,7 @@ class MCPConnection:
 
         future: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
         self._pending[req_id] = future
+        self._in_flight += 1
 
         data = json.dumps(message) + "\n"
         self._process.stdin.write(data.encode())
@@ -293,6 +370,10 @@ class MCPConnection:
         except asyncio.TimeoutError:
             self._pending.pop(req_id, None)
             raise TimeoutError(f"MCP {self.name} request {method} timed out")
+        finally:
+            self._in_flight -= 1
+            if self._in_flight == 0 and self._drain_event is not None:
+                self._drain_event.set()
 
         if "error" in result:
             err = result["error"]
@@ -406,6 +487,58 @@ class MCPConnection:
         except json.JSONDecodeError:
             return {"error": {"code": -32700, "message": "Could not parse SSE response"}}
 
+    async def _drain_stderr(self) -> None:
+        """Drain child process stderr; keep a rolling tail for diagnostics."""
+        if not self._process or not self._process.stderr:
+            return
+        try:
+            while True:
+                line = await self._process.stderr.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    self._stderr_tail.append(text)
+                    logger.debug("[%s stderr] %s", self.name, text)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    def _exit_diagnostic(self) -> str:
+        """Build a helpful error message including command + exit code + stderr tail.
+
+        Surfaces actionable context when an MCP child process dies early:
+        - what command we tried to run
+        - the OS exit code if available
+        - the last few stderr lines (often contain the actual error)
+        """
+        parts: list[str] = [f"MCP '{self.name}' child process exited"]
+
+        exit_code = None
+        if self._process is not None:
+            exit_code = self._process.returncode
+        if exit_code is not None:
+            parts.append(f"with exit code {exit_code}")
+
+        if self._config.transport == "stdio":
+            cmd_summary = self._config.command
+            if self._config.args:
+                cmd_summary += " " + " ".join(self._config.args[:4])
+                if len(self._config.args) > 4:
+                    cmd_summary += " ..."
+            parts.append(f"(command: {cmd_summary!r})")
+        elif self._config.url:
+            parts.append(f"(url: {self._config.url!r})")
+
+        if self._stderr_tail:
+            tail = " | ".join(list(self._stderr_tail)[-3:])
+            parts.append(f"stderr tail: {tail}")
+        else:
+            parts.append("no stderr output captured — verify the command is an MCP server, not a one-shot command")
+
+        return "; ".join(parts)
+
     async def _read_stdout(self) -> None:
         """Read JSON-RPC messages from the child process stdout."""
         assert self._process and self._process.stdout
@@ -414,6 +547,7 @@ class MCPConnection:
             while True:
                 line = await self._process.stdout.readline()
                 if not line:
+                    # EOF — child process exited; fail all pending futures
                     break
 
                 text = line.decode("utf-8").strip()
@@ -432,7 +566,6 @@ class MCPConnection:
                     if not future.done():
                         future.set_result(msg)
                 elif "method" in msg:
-                    # Server-initiated notification
                     logger.debug("Notification from %s: %s", self.name, msg.get("method"))
 
         except asyncio.CancelledError:
@@ -440,3 +573,15 @@ class MCPConnection:
         except Exception as exc:
             logger.error("Reader error for %s: %s", self.name, exc)
             self._state = ConnectionState.ERROR
+        finally:
+            # Fail all pending futures with a diagnostic that includes the
+            # exit code, command, and last few stderr lines — saves a lot of
+            # debugging when a misconfigured command silently fails.
+            if self._pending:
+                # Give stderr drain a tick to flush before we read the tail
+                await asyncio.sleep(0)
+                err = ConnectionError(self._exit_diagnostic())
+                for future in self._pending.values():
+                    if not future.done():
+                        future.set_exception(err)
+                self._pending = {}

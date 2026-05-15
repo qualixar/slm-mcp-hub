@@ -75,9 +75,10 @@ def setup_register(
         click.echo("No AI clients detected. Nothing to register.")
         return
 
-    registrar = AutoRegister(hub_url)
+    # Accept both 'claude-desktop' and 'claude_desktop' forms
+    normalized = client_name.replace("-", "_") if client_name else None
     targets = clients if register_all else tuple(
-        c for c in clients if c.name == client_name
+        c for c in clients if c.name == normalized
     )
 
     if not targets:
@@ -85,6 +86,13 @@ def setup_register(
         return
 
     for client in targets:
+        # Claude Desktop reliably supports stdio entries; HTTP loopback entries
+        # are blocked by Anthropic's CA-signed-cert requirement. Stdio mode
+        # spawns `slm-hub mcp` as a subprocess — no Node bridge.
+        if client.name == "claude_desktop":
+            registrar = AutoRegister(hub_url, transport="stdio")
+        else:
+            registrar = AutoRegister(hub_url)
         if dry_run:
             plan = registrar.plan(client)
             _display_plan(plan)
@@ -113,8 +121,10 @@ def setup_unregister(client_name: str | None, unregister_all: bool) -> None:
     clients = detector.detect_all()
     registrar = AutoRegister()
 
+    # Accept both 'claude-desktop' and 'claude_desktop' forms
+    normalized = client_name.replace("-", "_") if client_name else None
     targets = clients if unregister_all else tuple(
-        c for c in clients if c.name == client_name
+        c for c in clients if c.name == normalized
     )
 
     for client in targets:

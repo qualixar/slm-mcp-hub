@@ -1,7 +1,7 @@
 {
   "name": "slm-mcp-hub",
-  "version": "0.1.8",
-  "description": "The world's first MCP gateway that learns. Intelligent federation, caching, cost tracking, and SLM memory integration for Model Context Protocol servers.",
+  "version": "0.2.0",
+  "description": "The first MCP gateway that learns, hot-reloads, and serves both stdio + HTTP natively. Zero-restart server lifecycle, native Claude Desktop integration, intelligent federation, and learned routing for Model Context Protocol.",
   "keywords": [
     "mcp",
     "model-context-protocol",

@@ -15,6 +15,11 @@ logger = logging.getLogger(__name__)
 
 # Retry config
 _INITIAL_RETRY_DELAY_S = 5.0
+# Fast cold-start retry schedule (Phase 6, Charter Feature C1).
+# Called explicitly by `slm-hub start` after the initial connect_all()
+# parallel attempt. Slow background _retry_failed_servers() still runs
+# afterwards for any servers that still fail.
+_FAST_RETRY_DELAYS_S: tuple[float, ...] = (0.5, 1.5, 4.5)
 _MAX_RETRY_DELAY_S = 120.0
 _MAX_RETRY_ATTEMPTS = 5
 
@@ -42,6 +47,24 @@ class ConnectionManager:
         self._connect_times: dict[str, float] = {}
         self._retry_task: asyncio.Task | None = None
         self._shutdown = False
+        # Serializes all mutation operations (add/remove/modify/sync).
+        # Reads (route_tool_call, registry lookups) are lock-free — atomic swap
+        # on registry means reads see consistent old-or-new state, never partial.
+        self._lock: asyncio.Lock = asyncio.Lock()
+        # Optional notifier — set by HubRuntime so we can fire
+        # notifications/tools/list_changed when the registry actually changes.
+        # When None (e.g. in unit tests), changes are silent.
+        self._notifier: Any | None = None
+
+    def set_notifier(self, notifier: Any | None) -> None:
+        """Attach a ChangeNotifier. HubRuntime wires this after construction."""
+        self._notifier = notifier
+
+    @property
+    def config(self) -> HubConfig:
+        """Current effective config (mutable: add_server/remove_server/replace_server
+        update this in place so subsequent reload diffs see the latest state)."""
+        return self._config
 
     @property
     def connections(self) -> dict[str, MCPConnection]:
@@ -125,7 +148,8 @@ class ConnectionManager:
         if server_name in self._failed:
             return False, f"Failed: {self._failed[server_name]}"
 
-        return True, f"Connected: {self._connections[server_name].capabilities.get('tools', []).__len__()} tools"
+        tool_count = len(self._connections[server_name].capabilities.get("tools", []))
+        return True, f"Connected: {tool_count} tools"
 
     async def connect_one(self, server_name: str) -> bool:
         """Connect to a single server by name. Returns True on success."""
@@ -154,9 +178,130 @@ class ConnectionManager:
         logger.info("All MCP connections closed")
 
     async def disconnect_one(self, server_name: str) -> None:
-        """Disconnect a single server."""
-        await self._disconnect_one(server_name)
-        self._sync_registry()
+        """Disconnect a single server and remove it from the live connection map."""
+        async with self._lock:
+            await self._disconnect_one(server_name)
+            self._connections.pop(server_name, None)
+            self._failed.pop(server_name, None)
+            self._connect_times.pop(server_name, None)
+            self._sync_registry()
+
+    async def add_server(self, server_config: MCPServerConfig) -> tuple[bool, str]:
+        """Add and connect a new server at runtime. No hub restart required.
+
+        Returns (success, message). On success, the server's tools are
+        immediately available via hub__call_tool. Other connections are
+        untouched — kite SSE sessions survive this call.
+        """
+        async with self._lock:
+            name = server_config.name
+            if name in self._connections and self._connections[name].is_connected:
+                return False, f"Server '{name}' is already connected"
+
+            # Persist to in-memory config so reconnect/status pick it up
+            existing_names = {s.name for s in self._config.mcp_servers}
+            if name not in existing_names:
+                from dataclasses import replace as dc_replace
+                new_servers = tuple(self._config.mcp_servers) + (server_config,)
+                self._config = dc_replace(self._config, mcp_servers=new_servers)
+
+            await self._connect_timed(server_config)
+
+        if name in self._failed:
+            return False, f"Failed to connect: {self._failed[name]}"
+        tool_count = len(self._connections[name].capabilities.get("tools", []))
+        return True, f"Connected: {tool_count} tools"
+
+    async def remove_server(self, server_name: str, drain_timeout_s: float = 30.0) -> tuple[bool, str]:
+        """Drain in-flight calls then disconnect and deregister a server.
+
+        Existing connections to OTHER servers are untouched. New tool calls
+        to this server are rejected immediately (DRAINING state). In-flight
+        calls are given drain_timeout_s to complete before force-disconnect.
+        """
+        conn = self._connections.get(server_name)
+        if conn is None:
+            return False, f"Server '{server_name}' not found in active connections"
+
+        # Drain outside the lock — drain waits on asyncio events which may
+        # themselves need the event loop. Holding the lock during drain would
+        # deadlock any concurrent add_server call.
+        await conn.drain_and_disconnect(timeout_s=drain_timeout_s)
+
+        async with self._lock:
+            self._connections.pop(server_name, None)
+            self._failed.pop(server_name, None)
+            self._connect_times.pop(server_name, None)
+            # Remove from in-memory config
+            from dataclasses import replace as dc_replace
+            new_servers = tuple(s for s in self._config.mcp_servers if s.name != server_name)
+            self._config = dc_replace(self._config, mcp_servers=new_servers)
+            self._sync_registry()
+
+        logger.info("Removed server: %s", server_name)
+        return True, f"Removed and deregistered: {server_name}"
+
+    async def replace_server(self, server_config: MCPServerConfig, drain_timeout_s: float = 30.0) -> tuple[bool, str]:
+        """Restart a single server in-place (e.g. after env/config change).
+
+        Drains the old connection, then connects fresh with the new config.
+        Other connections are untouched.
+        """
+        name = server_config.name
+        old_conn = self._connections.get(name)
+
+        if old_conn is not None:
+            await old_conn.drain_and_disconnect(timeout_s=drain_timeout_s)
+            async with self._lock:
+                self._connections.pop(name, None)
+                self._failed.pop(name, None)
+                # Replace config entry
+                from dataclasses import replace as dc_replace
+                new_servers = tuple(
+                    server_config if s.name == name else s
+                    for s in self._config.mcp_servers
+                )
+                self._config = dc_replace(self._config, mcp_servers=new_servers)
+
+        ok, msg = await self.add_server(server_config)
+        return ok, msg
+
+    async def fast_retry_failed(self) -> dict[str, str]:
+        """Quick retry pass for servers that failed in connect_all().
+
+        Schedule: 0.5s → 1.5s → 4.5s gaps between attempts (Charter C1).
+        Called explicitly by `slm-hub start` cold path so that unit tests
+        which simulate connection failures aren't slowed by 6.5s of sleep.
+
+        After this returns, the slow background _retry_failed_servers()
+        loop continues to retry anything still failing.
+        """
+        for delay in _FAST_RETRY_DELAYS_S:
+            if not self._failed or self._shutdown:
+                break
+            await asyncio.sleep(delay)
+            failed_names = list(self._failed.keys())
+            logger.info(
+                "Fast cold-start retry (delay %.1fs) for %d servers: %s",
+                delay, len(failed_names), failed_names,
+            )
+            for name in failed_names:
+                srv_cfg = next(
+                    (s for s in self._config.mcp_servers if s.name == name),
+                    None,
+                )
+                if srv_cfg is None:
+                    continue
+                # Clean up the previous failed connection object before retrying
+                old = self._connections.pop(name, None)
+                if old is not None:
+                    try:
+                        await old.disconnect()
+                    except Exception:
+                        pass
+                async with self._lock:
+                    await self._connect_timed(srv_cfg)
+        return dict(self._failed)
 
     def get_server_status(self) -> list[dict[str, Any]]:
         """Get status of all servers including connection times."""
@@ -233,12 +378,27 @@ class ConnectionManager:
             logger.warning("Error disconnecting %s: %s", server_name, exc)
 
     def _sync_registry(self) -> None:
-        """Sync all connected server capabilities into the registry."""
+        """Sync all connected server capabilities into the registry.
+
+        Consumes the `changed` flag CapabilityRegistry.sync() returns —
+        if the namespaced tool/resource/prompt set actually changed,
+        we fire the notifier so MCP clients get notifications/tools/list_changed.
+        """
         server_caps: dict[str, dict[str, Any]] = {}
         for name, conn in self._connections.items():
             if conn.is_connected:
                 server_caps[name] = conn.capabilities
-        self._registry.sync(server_caps)
+        changed = self._registry.sync(server_caps)
+
+        if changed and self._notifier is not None:
+            # Schedule the notification — debounce inside the notifier
+            # coalesces multiple syncs during startup or bulk reload.
+            try:
+                asyncio.create_task(self._notifier.notify_tools_changed())
+            except RuntimeError:
+                # No running event loop (e.g., test path that called sync
+                # synchronously outside an async context). Silent skip.
+                pass
 
     def _start_retry_loop(self) -> None:
         """Start background task to retry failed servers."""

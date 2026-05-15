@@ -65,7 +65,12 @@ class TestMCPConnectionDisconnect:
         proc.kill.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_disconnect_kills_on_process_lookup_error(self):
+    async def test_disconnect_handles_process_lookup_error_silently(self):
+        """When wait() raises ProcessLookupError, the child already exited —
+        disconnect should NOT escalate to kill() (regression: pre-v0.2.0,
+        the fallback kill() itself raised ProcessLookupError which propagated
+        up through drain_and_disconnect → remove_server → reloader, caught
+        by Stage 11 pre-release smoke)."""
         c = MCPConnection(_cfg())
         proc = MagicMock()
         proc.terminate = MagicMock()
@@ -73,7 +78,8 @@ class TestMCPConnectionDisconnect:
         proc.wait = AsyncMock(side_effect=ProcessLookupError)
         c._process = proc
         await c.disconnect()
-        proc.kill.assert_called_once()
+        proc.kill.assert_not_called()
+        assert c._process is None
 
     @pytest.mark.asyncio
     async def test_disconnect_fails_pending_futures(self):

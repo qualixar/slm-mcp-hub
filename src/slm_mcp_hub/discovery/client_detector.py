@@ -49,15 +49,24 @@ def _build_known_clients() -> tuple[ClientConfig, ...]:
     if is_mac:
         vscode_path = _macos_app_support() / "Code" / "User" / "settings.json"
         cursor_path = _macos_app_support() / "Cursor" / "User" / "settings.json"
+        claude_desktop_path = _macos_app_support() / "Claude" / "claude_desktop_config.json"
     else:
         vscode_path = _linux_config() / "Code" / "User" / "settings.json"
         cursor_path = _linux_config() / "Cursor" / "User" / "settings.json"
+        claude_desktop_path = _linux_config() / "Claude" / "claude_desktop_config.json"
 
     return (
         ClientConfig(
             name="claude_code",
             display_name="Claude Code",
             config_paths=(Path.home() / ".claude.json",),
+            mcp_key="mcpServers",
+            config_format="claude",
+        ),
+        ClientConfig(
+            name="claude_desktop",
+            display_name="Claude Desktop",
+            config_paths=(claude_desktop_path,),
             mcp_key="mcpServers",
             config_format="claude",
         ),
