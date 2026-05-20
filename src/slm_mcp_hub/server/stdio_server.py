@@ -184,8 +184,15 @@ class StdioServer:
         protocol = asyncio.StreamReaderProtocol(reader)
         await loop.connect_read_pipe(lambda: protocol, sys.stdin)
 
+        raw_stdout = sys.stdout
         transport, _ = await loop.connect_write_pipe(
-            asyncio.streams.FlowControlMixin, sys.stdout,
+            asyncio.streams.FlowControlMixin, raw_stdout,
         )
         writer = asyncio.StreamWriter(transport, _, reader, loop)
+        
+        # Redirect sys.stdout and sys.__stdout__ to sys.stderr to completely prevent
+        # other python code, third-party libraries, or click from writing to stdout.
+        sys.stdout = sys.stderr
+        sys.__stdout__ = sys.stderr
+        
         return reader, writer

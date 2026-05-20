@@ -216,6 +216,10 @@ def mcp_stdio(log_level: str) -> None:
     """
     # stdio mode REQUIRES stderr-only logging — stdout is for JSON-RPC.
     _setup_logging(log_level, stderr_only=True)
+    
+    import warnings
+    warnings.filterwarnings("ignore")
+    
     _load_secrets()
     config = load_config()
 
