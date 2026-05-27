@@ -9,6 +9,8 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from typing import TYPE_CHECKING
+
 from slm_mcp_hub.core.constants import (
     API_PREFIX,
     MCP_ENDPOINT_PATH,
@@ -17,6 +19,9 @@ from slm_mcp_hub.core.constants import (
 from slm_mcp_hub.server.mcp_endpoint import MCPEndpoint
 from slm_mcp_hub.server.proxy_endpoint import ProxyEndpoint
 from slm_mcp_hub.session.manager import SessionManager
+
+if TYPE_CHECKING:
+    from slm_mcp_hub.core.task_manager import TaskManager
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +35,7 @@ def create_app(
     registry: Any = None,
     reloader: Any = None,
     conn_manager: Any = None,
+    task_manager: TaskManager | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
