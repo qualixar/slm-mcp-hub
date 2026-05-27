@@ -57,6 +57,7 @@ class HubConfig:
     idle_shutdown_seconds: int = IDLE_SHUTDOWN_SECONDS
     log_level: str = "INFO"
     cors_origins: tuple[str, ...] = ("http://127.0.0.1", "http://localhost")
+    session_overflow: str = "raise"
     plugins_enabled: tuple[str, ...] = ()
 
 
@@ -144,6 +145,7 @@ def load_config(config_path: Path | None = None) -> HubConfig:
         mcp_servers=servers,
         session_timeout_seconds=raw.get("session_timeout_seconds", SESSION_TIMEOUT_SECONDS),
         max_sessions=raw.get("max_sessions", MAX_SESSIONS),
+        session_overflow=raw.get("session_overflow", "raise"),
         cache_ttl_seconds=raw.get("cache_ttl_seconds", CACHE_DEFAULT_TTL_SECONDS),
         cache_max_entries=raw.get("cache_max_entries", CACHE_MAX_ENTRIES),
         idle_shutdown_seconds=raw.get("idle_shutdown_seconds", IDLE_SHUTDOWN_SECONDS),
@@ -171,6 +173,7 @@ def _apply_env_overrides(config: HubConfig) -> HubConfig:
         mcp_servers=config.mcp_servers,
         session_timeout_seconds=config.session_timeout_seconds,
         max_sessions=config.max_sessions,
+        session_overflow=config.session_overflow,
         cache_ttl_seconds=config.cache_ttl_seconds,
         cache_max_entries=config.cache_max_entries,
         idle_shutdown_seconds=config.idle_shutdown_seconds,
@@ -341,6 +344,7 @@ def save_config(config: HubConfig, config_path: Path | None = None, force: bool 
         "mcpServers": servers_dict,
         "session_timeout_seconds": config.session_timeout_seconds,
         "max_sessions": config.max_sessions,
+        "session_overflow": config.session_overflow,
         "cache_ttl_seconds": config.cache_ttl_seconds,
         "cache_max_entries": config.cache_max_entries,
         "idle_shutdown_seconds": config.idle_shutdown_seconds,

@@ -53,6 +53,7 @@ class HubRuntime:
         self._session_manager = SessionManager(
             max_sessions=config.max_sessions,
             timeout_seconds=config.session_timeout_seconds,
+            overflow_policy=config.session_overflow,
         )
         self._mcp_endpoint = MCPEndpoint(
             self._registry, self._router, self._session_manager, hub=hub,

@@ -36,10 +36,12 @@ class SessionManager:
         self,
         max_sessions: int = MAX_SESSIONS,
         timeout_seconds: int = SESSION_TIMEOUT_SECONDS,
+        overflow_policy: str = "raise",
     ) -> None:
         self._sessions: dict[str, SessionInfo] = {}
         self._max_sessions = max_sessions
         self._timeout_seconds = timeout_seconds
+        self._overflow_policy = overflow_policy
 
     @property
     def active_count(self) -> int:
@@ -57,15 +59,21 @@ class SessionManager:
     ) -> str:
         """Create a new session and return the session_id.
 
-        Raises ValueError if max sessions reached.
+        Raises ValueError if max sessions reached and overflow_policy is 'raise'.
+        Evicts oldest session if overflow_policy is 'evict_lru'.
         """
         self._cleanup_expired()
 
         if len(self._sessions) >= self._max_sessions:
-            raise ValueError(
-                f"Max sessions ({self._max_sessions}) reached. "
-                "Close an existing session first."
-            )
+            if self._overflow_policy == "evict_lru":
+                oldest_sid = min(self._sessions, key=lambda sid: self._sessions[sid].last_activity)
+                self._remove(oldest_sid)
+                logger.info("Evicted oldest session %s (overflow policy)", oldest_sid[:8])
+            else:
+                raise ValueError(
+                    f"Max sessions ({self._max_sessions}) reached. "
+                    "Close an existing session first."
+                )
 
         session_id = str(uuid.uuid4())
         now = time.time()
