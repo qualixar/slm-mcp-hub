@@ -434,7 +434,7 @@ class TestFederationRouter:
     # ------------------------------------------------------------------
 
     def _setup_slm_router(self):
-        """Router wired to a fake 'slm' server exposing remember/recall."""
+        """Router wired to a fake 'slm' server exposing all agent-id-aware tools."""
         reg = CapabilityRegistry()
         reg.sync({
             "slm": {
@@ -442,6 +442,9 @@ class TestFederationRouter:
                     {"name": "remember", "description": "Store memory"},
                     {"name": "recall", "description": "Search memories"},
                     {"name": "delete_memory", "description": "Delete memory"},
+                    {"name": "update_memory", "description": "Update memory"},
+                    {"name": "observe", "description": "Observe conversation"},
+                    {"name": "session_init", "description": "Initialize session"},
                 ],
                 "resources": [],
                 "prompts": [],
@@ -479,10 +482,20 @@ class TestFederationRouter:
     async def test_agent_id_injected_for_all_slm_tools(self, monkeypatch):
         monkeypatch.setenv("SLM_AGENT_ID", "claude-desktop")
         router, mock = self._setup_slm_router()
-        for tool in ("remember", "recall", "delete_memory"):
+        for tool in ("remember", "recall", "delete_memory", "session_init"):
             mock.call_tool.reset_mock()
             await router.route_tool_call(f"slm__{tool}", {"content": "x"})
             assert mock.call_tool.call_args[0][1].get("agent_id") == "claude-desktop", tool
+
+    @pytest.mark.asyncio
+    async def test_agent_id_injected_for_session_init(self, monkeypatch):
+        """session_init gains agent_id injection so agent.connected events are attributed correctly."""
+        monkeypatch.setenv("SLM_AGENT_ID", "claude-code")
+        router, mock = self._setup_slm_router()
+        await router.route_tool_call("slm__session_init", {"project_path": "/my/project"})
+        args = mock.call_tool.call_args[0][1]
+        assert args["agent_id"] == "claude-code"
+        assert args["project_path"] == "/my/project"
 
     @pytest.mark.asyncio
     async def test_agent_id_not_injected_for_non_slm_tools(self, monkeypatch):

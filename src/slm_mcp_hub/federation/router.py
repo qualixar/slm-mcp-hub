@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 # prefix) so both "remember" and "slm__remember" are caught.
 _AGENT_ID_TOOLS: frozenset[str] = frozenset({
     "remember", "recall", "delete_memory", "update_memory", "observe",
+    "session_init",
 })
 
 
