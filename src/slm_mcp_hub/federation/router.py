@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +12,24 @@ from slm_mcp_hub.core.registry import CapabilityRegistry
 from slm_mcp_hub.federation.connection import MCPConnection
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Agent-id injection
+# ---------------------------------------------------------------------------
+# When SLM_AGENT_ID is set in the hub process env (e.g. "claude-desktop" via
+# the "env" block of claude_desktop_config.json), the router injects it as
+# agent_id into SLM tool calls that support the parameter but omit it.
+#
+# This makes attribution explicit in the MCP call itself rather than relying
+# solely on env-var inheritance inside the downstream server process — the
+# downstream server's own SLM_AGENT_ID fallback then only fires for callers
+# that reach SLM without going through this hub.
+#
+# Matching is by bare tool name (after stripping any "server__" namespace
+# prefix) so both "remember" and "slm__remember" are caught.
+_AGENT_ID_TOOLS: frozenset[str] = frozenset({
+    "remember", "recall", "delete_memory", "update_memory", "observe",
+})
 
 
 @dataclass(frozen=True)
@@ -76,6 +95,13 @@ class FederationRouter:
                 duration_ms=0,
                 success=False,
             )
+
+        # Inject agent_id when the tool supports it and the caller omitted it.
+        bare_name = cap.original_name.split("__")[-1]
+        if bare_name in _AGENT_ID_TOOLS and "agent_id" not in arguments:
+            hub_agent = os.environ.get("SLM_AGENT_ID", "").strip()
+            if hub_agent:
+                arguments = {**arguments, "agent_id": hub_agent}
 
         start = time.monotonic()
         try:

@@ -429,6 +429,69 @@ class TestFederationRouter:
         result = await router.route_prompt_get("github__review", {})
         assert result.success is False
 
+    # ------------------------------------------------------------------
+    # Agent-id injection tests
+    # ------------------------------------------------------------------
+
+    def _setup_slm_router(self):
+        """Router wired to a fake 'slm' server exposing remember/recall."""
+        reg = CapabilityRegistry()
+        reg.sync({
+            "slm": {
+                "tools": [
+                    {"name": "remember", "description": "Store memory"},
+                    {"name": "recall", "description": "Search memories"},
+                    {"name": "delete_memory", "description": "Delete memory"},
+                ],
+                "resources": [],
+                "prompts": [],
+                "resource_templates": [],
+            },
+        })
+        mock_conn = AsyncMock(spec=MCPConnection)
+        mock_conn.is_connected = True
+        mock_conn.call_tool = AsyncMock(return_value={"content": [{"type": "text", "text": "ok"}]})
+        return FederationRouter(reg, {"slm": mock_conn}), mock_conn
+
+    @pytest.mark.asyncio
+    async def test_agent_id_injected_when_env_set_and_arg_absent(self, monkeypatch):
+        monkeypatch.setenv("SLM_AGENT_ID", "claude-desktop")
+        router, mock = self._setup_slm_router()
+        await router.route_tool_call("slm__remember", {"content": "hello"})
+        _, called_args = mock.call_tool.call_args
+        assert mock.call_tool.call_args[0][1]["agent_id"] == "claude-desktop"
+
+    @pytest.mark.asyncio
+    async def test_agent_id_not_overridden_when_caller_provides_it(self, monkeypatch):
+        monkeypatch.setenv("SLM_AGENT_ID", "claude-desktop")
+        router, mock = self._setup_slm_router()
+        await router.route_tool_call("slm__remember", {"content": "hi", "agent_id": "explicit"})
+        assert mock.call_tool.call_args[0][1]["agent_id"] == "explicit"
+
+    @pytest.mark.asyncio
+    async def test_agent_id_not_injected_when_env_unset(self, monkeypatch):
+        monkeypatch.delenv("SLM_AGENT_ID", raising=False)
+        router, mock = self._setup_slm_router()
+        await router.route_tool_call("slm__remember", {"content": "hello"})
+        assert "agent_id" not in mock.call_tool.call_args[0][1]
+
+    @pytest.mark.asyncio
+    async def test_agent_id_injected_for_all_slm_tools(self, monkeypatch):
+        monkeypatch.setenv("SLM_AGENT_ID", "claude-desktop")
+        router, mock = self._setup_slm_router()
+        for tool in ("remember", "recall", "delete_memory"):
+            mock.call_tool.reset_mock()
+            await router.route_tool_call(f"slm__{tool}", {"content": "x"})
+            assert mock.call_tool.call_args[0][1].get("agent_id") == "claude-desktop", tool
+
+    @pytest.mark.asyncio
+    async def test_agent_id_not_injected_for_non_slm_tools(self, monkeypatch):
+        """Non-SLM tools (e.g. github__search) must not have agent_id injected."""
+        monkeypatch.setenv("SLM_AGENT_ID", "claude-desktop")
+        router, mock = self._setup_router()  # github server
+        await router.route_tool_call("github__search", {"q": "test"})
+        assert "agent_id" not in mock.call_tool.call_args[0][1]
+
 
 class TestRouteResult:
     def test_immutable_fields(self):
