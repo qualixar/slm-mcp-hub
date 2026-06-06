@@ -12,7 +12,7 @@ from enum import Enum
 from typing import Any
 
 from slm_mcp_hub.core.config import MCPServerConfig
-from slm_mcp_hub.core.constants import MCP_REQUEST_TIMEOUT_MS, VERSION
+from slm_mcp_hub.core.constants import DEFAULT_TOOL_TIMEOUT_S, MCP_REQUEST_TIMEOUT_MS, VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -187,23 +187,29 @@ class MCPConnection:
 
             await self.disconnect()
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Call a tool on this MCP server and return the result."""
+    async def call_tool(self, tool_name: str, arguments: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
+        """Call a tool on this MCP server and return the result.
+
+        Args:
+            tool_name: Name of the tool to call.
+            arguments: Arguments to pass to the tool.
+            timeout_s: Per-call timeout in seconds. Uses server default if None.
+        """
         return await self._send_request("tools/call", {
             "name": tool_name,
             "arguments": arguments,
-        })
+        }, timeout_s=timeout_s)
 
-    async def read_resource(self, uri: str) -> dict[str, Any]:
+    async def read_resource(self, uri: str, timeout_s: float | None = None) -> dict[str, Any]:
         """Read a resource from this MCP server."""
-        return await self._send_request("resources/read", {"uri": uri})
+        return await self._send_request("resources/read", {"uri": uri}, timeout_s=timeout_s)
 
-    async def get_prompt(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def get_prompt(self, name: str, arguments: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
         """Get a prompt from this MCP server."""
         return await self._send_request("prompts/get", {
             "name": name,
             "arguments": arguments,
-        })
+        }, timeout_s=timeout_s)
 
     async def _connect_stdio(self) -> None:
         """Start a child process and perform MCP initialization handshake."""
@@ -333,14 +339,27 @@ class MCPConnection:
         except Exception as exc:
             logger.debug("No prompts for %s: %s", self.name, exc)
 
-    async def _send_request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Send a JSON-RPC request and wait for the response."""
+    async def _send_request(self, method: str, params: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
+        """Send a JSON-RPC request and wait for the response.
+
+        Args:
+            method: JSON-RPC method name.
+            params: Method parameters.
+            timeout_s: Per-call timeout override. Uses server default if None.
+        """
         if self._config.transport in ("http", "sse"):
             return await self._send_request_http(method, params)
-        return await self._send_request_stdio(method, params)
+        return await self._send_request_stdio(method, params, timeout_s=timeout_s)
 
-    async def _send_request_stdio(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
-        """Send via stdio subprocess."""
+    async def _send_request_stdio(self, method: str, params: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
+        """Send via stdio subprocess.
+
+        Args:
+            method: JSON-RPC method name.
+            params: Method parameters.
+            timeout_s: Per-call timeout in seconds. Falls back to MCP_REQUEST_TIMEOUT_MS
+                       if None (long timeout for video gen / deep research).
+        """
         if self._state == ConnectionState.DRAINING:
             raise ConnectionError(f"MCP {self.name} is draining — no new requests accepted")
         if not self._process or not self._process.stdin:
@@ -365,8 +384,8 @@ class MCPConnection:
         await self._process.stdin.drain()
 
         try:
-            timeout_s = MCP_REQUEST_TIMEOUT_MS / 1000
-            result = await asyncio.wait_for(future, timeout=timeout_s)
+            effective_timeout = timeout_s if timeout_s is not None else (MCP_REQUEST_TIMEOUT_MS / 1000)
+            result = await asyncio.wait_for(future, timeout=effective_timeout)
         except asyncio.TimeoutError:
             self._pending.pop(req_id, None)
             raise TimeoutError(f"MCP {self.name} request {method} timed out")

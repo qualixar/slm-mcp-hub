@@ -87,11 +87,11 @@ class MCPEndpoint:
 
         meta_tools = [
             {
-                "name": "hub__search_tools",
+                "name": "search_tools",
                 "description": (
                     f"Search across {total_tools} tools from {server_count} MCP servers. "
                     "Returns matching tool names, descriptions, server name, and full input schema. "
-                    "Use this to find the right tool before calling it with hub__call_tool. "
+                    "Use this to find the right tool before calling it with call_tool. "
                     "Example queries: 'github search', 'generate image', 'database query', 'memory recall'."
                 ),
                 "inputSchema": {
@@ -106,10 +106,10 @@ class MCPEndpoint:
                 },
             },
             {
-                "name": "hub__call_tool",
+                "name": "call_tool",
                 "description": (
                     "Call any tool from any connected MCP server. "
-                    "First use hub__search_tools to find the tool name and its parameters, "
+                    "First use search_tools to find the tool name and its parameters, "
                     "then call it here. The tool name must be the full namespaced name "
                     "from the search results (e.g., 'github__search_repositories')."
                 ),
@@ -118,11 +118,11 @@ class MCPEndpoint:
                     "properties": {
                         "tool": {
                             "type": "string",
-                            "description": "Full tool name from hub__search_tools results (e.g., 'context7__query-docs')",
+                            "description": "Full tool name from search_tools results (e.g., 'context7__query-docs')",
                         },
                         "arguments": {
                             "type": "object",
-                            "description": "Arguments to pass to the tool — see inputSchema from hub__search_tools",
+                            "description": "Arguments to pass to the tool — see inputSchema from search_tools",
                             "additionalProperties": True,
                         },
                     },
@@ -130,7 +130,7 @@ class MCPEndpoint:
                 },
             },
             {
-                "name": "hub__list_servers",
+                "name": "list_servers",
                 "description": (
                     f"List all {server_count} connected MCP servers with their tool counts. "
                     "Use to understand what's available before searching."
@@ -141,15 +141,22 @@ class MCPEndpoint:
 
         return {"tools": meta_tools}
 
+    _META_TOOL_ALIASES = {
+        "hub__search_tools": "search_tools",
+        "hub__call_tool": "call_tool",
+        "hub__list_servers": "list_servers",
+    }
+
     async def _handle_meta_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Handle Meta-MCP hub__ tools."""
-        if name == "hub__search_tools":
+        """Handle Meta-MCP hub meta-tools."""
+        name = self._META_TOOL_ALIASES.get(name, name)
+        if name == "search_tools":
             return await self._meta_search_tools(arguments)
 
-        if name == "hub__call_tool":
+        if name == "call_tool":
             return await self._meta_call_tool(arguments)
 
-        if name == "hub__list_servers":
+        if name == "list_servers":
             return await self._meta_list_servers()
 
         return {"content": [{"type": "text", "text": f"Unknown meta-tool: {name}"}], "isError": True}
@@ -193,9 +200,15 @@ class MCPEndpoint:
 
         if not tool_name:
             return {
-                "content": [{"type": "text", "text": "Error: 'tool' parameter is required. Use hub__search_tools to find tool names."}],
+                "content": [{"type": "text", "text": "Error: 'tool' parameter is required. Use search_tools to find tool names."}],
                 "isError": True,
             }
+
+        # Bug C fix: handle meta-tool calls locally instead of routing
+        # through the federation router (which doesn't know about meta-tools).
+        resolved = self._META_TOOL_ALIASES.get(tool_name, tool_name)
+        if resolved in ("search_tools", "call_tool", "list_servers"):
+            return await self._handle_meta_tool(resolved, tool_args)
 
         start = time.time()
         result = await self._router.route_tool_call(tool_name, tool_args)
@@ -247,9 +260,10 @@ class MCPEndpoint:
         self._session_manager.touch(session_id)
         name = params.get("name", "")
         arguments = params.get("arguments", {})
+        name = self._META_TOOL_ALIASES.get(name, name)
 
-        # Handle Meta-MCP tools locally
-        if name.startswith("hub__"):
+        # Handle Meta-MCP tools locally (including unknown hub__ names)
+        if name.startswith("hub__") or name in ("search_tools", "call_tool", "list_servers"):
             return await self._handle_meta_tool(name, arguments)
 
         start = time.time()

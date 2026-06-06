@@ -140,9 +140,9 @@ def create_app(
             "total_servers": len(servers),
             "total_tools": len(tool_list),
             "invocation": {
-                "search": 'hub__search_tools(query="keyword")',
-                "call": 'hub__call_tool(tool="server__tool_name", arguments={...})',
-                "list": "hub__list_servers()",
+                "search": 'search_tools(query="keyword")',
+                "call": 'call_tool(tool="server__tool_name", arguments={...})',
+                "list": "list_servers()",
             },
             "servers": server_summary,
         }

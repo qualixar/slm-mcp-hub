@@ -5,6 +5,17 @@ All notable changes to SLM MCP Hub will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.3] - 2026-06-07
+
+### Added
+- **Per-call timeout for tool invocations** (`DEFAULT_TOOL_TIMEOUT_S = 120`): Tool calls now have a 2-minute default timeout instead of the 60-minute ceiling. Quick searches fail fast instead of hanging for an hour. Overridable per-server via `timeout_s` parameter on `route_tool_call`.
+
+### Fixed
+- **Meta-tool rename from `hub__*` to bare names**: `hub__search_tools` → `search_tools`, `hub__call_tool` → `call_tool`, `hub__list_servers` → `list_servers`. Backward-compatible aliases preserved (`_META_TOOL_ALIASES`) so existing client code with `hub__` prefix continues to work. Fixes Grok CLI compatibility (Grok's MCP client couldn't parse `hub__` prefixed tool names).
+- **`slm-hub tools` CLI returns empty output** (Bug A): Rewrote to use `/api/servers/detail` REST endpoint instead of POSTing to MCP without a session. Now correctly lists all 50 servers with their tools.
+- **`call_tool` meta-tool can't route to meta-tools** (Bug C): When `call_tool(tool="list_servers")` is called, the hub now handles it locally instead of routing to the federation router (which doesn't know about meta-tools).
+- **Updated tests for renamed meta-tools**: All 654 tests pass with the new naming convention.
+
 ## [0.2.1] - 2026-05-15
 
 ### Documentation

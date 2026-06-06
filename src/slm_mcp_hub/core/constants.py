@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 # Version
-VERSION = "0.2.2"
+VERSION = "0.2.3"
 
 # Network
 DEFAULT_PORT = 52414
@@ -38,6 +38,7 @@ CACHE_MAX_ENTRIES = 1000
 # Lifecycle
 IDLE_SHUTDOWN_SECONDS = 1800  # 30 minutes
 MCP_REQUEST_TIMEOUT_MS = 3_600_000  # 60 minutes (video gen, deep research, long-running AI tasks)
+DEFAULT_TOOL_TIMEOUT_S = 120  # 2 minutes default for tool calls (overridable per-server)
 
 # Resilience
 REQUEST_BUFFER_MAX = 100

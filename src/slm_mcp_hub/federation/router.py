@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from slm_mcp_hub.core.constants import DEFAULT_TOOL_TIMEOUT_S
 from slm_mcp_hub.core.registry import CapabilityRegistry
 from slm_mcp_hub.federation.connection import MCPConnection
 
@@ -44,8 +45,15 @@ class FederationRouter:
         self,
         namespaced_name: str,
         arguments: dict[str, Any],
+        timeout_s: float | None = None,
     ) -> RouteResult:
-        """Route a tool call to the correct MCP server."""
+        """Route a tool call to the correct MCP server.
+
+        Args:
+            namespaced_name: Full tool name (e.g. 'github__search_repositories').
+            arguments: Tool arguments.
+            timeout_s: Per-call timeout in seconds. Uses DEFAULT_TOOL_TIMEOUT_S if None.
+        """
         cap = self._registry.lookup_tool(namespaced_name)
         if cap is None:
             return RouteResult(
@@ -77,9 +85,11 @@ class FederationRouter:
                 success=False,
             )
 
+        # Use tool timeout unless a longer one was explicitly provided
+        effective_timeout = timeout_s if timeout_s is not None else DEFAULT_TOOL_TIMEOUT_S
         start = time.monotonic()
         try:
-            result = await conn.call_tool(cap.original_name, arguments)
+            result = await conn.call_tool(cap.original_name, arguments, timeout_s=effective_timeout)
             duration = int((time.monotonic() - start) * 1000)
             is_error = result.get("isError", False)
             return RouteResult(

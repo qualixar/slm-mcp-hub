@@ -204,12 +204,12 @@ class TestM4IntegrationFlow:
                 "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
             })
             tool_names = [t["name"] for t in list_result["result"]["tools"]]
-            assert "hub__search_tools" in tool_names
-            assert "hub__list_servers" in tool_names
+            assert "search_tools" in tool_names
+            assert "list_servers" in tool_names
             # 3. Call meta-tool: search
             search_result = await endpoint.handle_jsonrpc(sid, {
                 "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-                "params": {"name": "hub__search_tools", "arguments": {"query": "echo"}},
+                "params": {"name": "search_tools", "arguments": {"query": "echo"}},
             })
             assert "echo" in search_result["result"]["content"][0]["text"]
 

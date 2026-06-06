@@ -259,10 +259,10 @@ class TestMCPEndpoint:
         result = await ep.handle_tools_list(sid, {})
         names = [t["name"] for t in result["tools"]]
         # Meta-tools + 1 federated tool
-        assert "hub__search_tools" in names
-        assert "hub__list_servers" in names
+        assert "search_tools" in names
+        assert "list_servers" in names
         # In federated mode, only meta-tools are exposed (not individual server tools)
-        assert "hub__call_tool" in names
+        assert "call_tool" in names
 
     @pytest.mark.asyncio
     async def test_handle_tools_call(self):
@@ -418,9 +418,9 @@ class TestHTTPServer:
         assert resp.status_code == 200
         tools = resp.json()["result"]["tools"]
         names = [t["name"] for t in tools]
-        assert "hub__search_tools" in names
+        assert "search_tools" in names
         # In federated mode, only meta-tools are exposed (not individual server tools)
-        assert "hub__call_tool" in names
+        assert "call_tool" in names
 
     def test_mcp_tools_call(self):
         client, _ = self._make_client()

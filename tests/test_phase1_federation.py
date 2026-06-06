@@ -343,7 +343,7 @@ class TestFederationRouter:
         assert result.server_name == "github"
         assert result.tool_name == "search"
         assert result.duration_ms >= 0
-        mock.call_tool.assert_called_once_with("search", {"q": "test"})
+        mock.call_tool.assert_called_once_with("search", {"q": "test"}, timeout_s=120)
 
     @pytest.mark.asyncio
     async def test_route_tool_not_found(self):

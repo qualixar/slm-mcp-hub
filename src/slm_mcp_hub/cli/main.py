@@ -539,40 +539,47 @@ def daemon_status() -> None:
 @cli.command("tools")
 @click.option("--query", "-q", default="", help="Search tools by keyword")
 def tools_cmd(query: str) -> None:
-    """List available tools from the running hub."""
+    """List available tools from the running hub via REST API.
+
+    Uses the /api/servers/detail endpoint (not MCP) so it works without
+    establishing an MCP session — faster and more reliable.
+    """
     import httpx
 
     config = load_config()
     try:
-        if query:
-            resp = httpx.post(
-                f"http://{config.host}:{config.port}/mcp",
-                json={
-                    "jsonrpc": "2.0", "id": 1,
-                    "method": "tools/call",
-                    "params": {"name": "hub__search_tools", "arguments": {"query": query}},
-                },
-                headers={"Content-Type": "application/json"},
-                timeout=30.0,
-            )
-        else:
-            resp = httpx.post(
-                f"http://{config.host}:{config.port}/mcp",
-                json={
-                    "jsonrpc": "2.0", "id": 1,
-                    "method": "tools/call",
-                    "params": {"name": "hub__list_servers", "arguments": {}},
-                },
-                headers={"Content-Type": "application/json"},
-                timeout=30.0,
-            )
+        resp = httpx.get(
+            f"http://{config.host}:{config.port}/api/servers/detail",
+            timeout=10.0,
+        )
+        resp.raise_for_status()
+        servers = resp.json()
 
-        data = resp.json()
-        result = data.get("result", {})
-        content = result.get("content", [])
-        for block in content:
-            if block.get("type") == "text":
-                click.echo(block["text"])
+        if isinstance(servers, dict):
+            servers = servers.get("servers", [])
+
+        if query:
+            q = query.lower()
+            servers = [
+                s for s in servers
+                if q in s.get("name", "").lower()
+                or q in str(s.get("tools", [])).lower()
+            ]
+
+        for srv in sorted(servers, key=lambda s: s.get("name", "")):
+            name = srv.get("name", "?")
+            tools_val = srv.get("tools", [])
+            status = srv.get("status", "?")
+            transport = srv.get("transport", "?")
+            if isinstance(tools_val, list):
+                click.echo(f"{name:<30} {transport:<8} {status:<12} ({len(tools_val)} tools)")
+                for t in sorted(tools_val)[:5]:
+                    click.echo(f"  └─ {t}")
+                if len(tools_val) > 5:
+                    click.echo(f"  ─ and {len(tools_val) - 5} more")
+            else:
+                click.echo(f"{name:<30} {transport:<8} {status:<12} (tool count: {tools_val})")
+
     except httpx.ConnectError:
         click.echo("Hub is not running. Start with: slm-hub start")
     except Exception as exc:
