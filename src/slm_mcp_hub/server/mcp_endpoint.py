@@ -137,6 +137,19 @@ class MCPEndpoint:
                 ),
                 "inputSchema": {"type": "object", "properties": {}},
             },
+            {
+                "name": "hub__close_session",
+                "description": "Close a hub session explicitly. Call this when you are done with a session to free resources.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": "Session ID to close (defaults to current session if omitted)",
+                        },
+                    },
+                },
+            },
         ]
 
         return {"tools": meta_tools}
@@ -145,9 +158,10 @@ class MCPEndpoint:
         "hub__search_tools": "search_tools",
         "hub__call_tool": "call_tool",
         "hub__list_servers": "list_servers",
+        "hub__close_session": "hub__close_session",
     }
 
-    async def _handle_meta_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _handle_meta_tool(self, name: str, arguments: dict[str, Any], session_id: str = "") -> dict[str, Any]:
         """Handle Meta-MCP hub meta-tools."""
         name = self._META_TOOL_ALIASES.get(name, name)
         if name == "search_tools":
@@ -158,6 +172,9 @@ class MCPEndpoint:
 
         if name == "list_servers":
             return await self._meta_list_servers()
+
+        if name == "hub__close_session":
+            return await self._meta_close_session(arguments, session_id)
 
         return {"content": [{"type": "text", "text": f"Unknown meta-tool: {name}"}], "isError": True}
 
@@ -255,6 +272,15 @@ class MCPEndpoint:
         result = {"server_count": len(servers), "servers": servers}
         return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
 
+    async def _meta_close_session(self, arguments: dict[str, Any], session_id: str) -> dict[str, Any]:
+        """Close a hub session explicitly."""
+        sid = arguments.get("session_id", session_id)
+        removed = self._session_manager.destroy_session(sid)
+        if removed:
+            logger.info("Session %s closed via hub__close_session", sid[:8])
+            return {"content": [{"type": "text", "text": json.dumps({"ok": True, "session_id": sid})}]}
+        return {"content": [{"type": "text", "text": json.dumps({"ok": False, "error": "Session not found"})}], "isError": True}
+
     async def handle_tools_call(self, session_id: str, params: dict[str, Any]) -> dict[str, Any]:
         """Handle tools/call — route to correct MCP server or handle meta-tools."""
         self._session_manager.touch(session_id)
@@ -264,7 +290,7 @@ class MCPEndpoint:
 
         # Handle Meta-MCP tools locally (including unknown hub__ names)
         if name.startswith("hub__") or name in ("search_tools", "call_tool", "list_servers"):
-            return await self._handle_meta_tool(name, arguments)
+            return await self._handle_meta_tool(name, arguments, session_id)
 
         start = time.time()
         result = await self._router.route_tool_call(name, arguments)
