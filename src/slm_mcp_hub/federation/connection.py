@@ -454,8 +454,14 @@ class MCPConnection:
 
         if "error" in result:
             err = result["error"]
+            if isinstance(err, dict):
+                code = err.get("code", -1)
+                msg = err.get("message", "unknown")
+            else:
+                code = -1
+                msg = str(err)
             raise RuntimeError(
-                f"MCP {self.name} error: [{err.get('code', -1)}] {err.get('message', 'unknown')}"
+                f"MCP {self.name} error: [{code}] {msg}"
             )
 
         return result.get("result", {})

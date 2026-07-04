@@ -5,6 +5,11 @@ All notable changes to SLM MCP Hub will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.5] - 2026-07-04
+
+### Fixed
+- **HTTP client error handling for string errors** (`federation/connection.py`): Safely handle cases where HTTP MCP servers return error fields as strings (like `{"error": "Unauthorized"}`) instead of JSON-RPC error objects. Previously, calling `err.get("code")` caused `AttributeError: 'str' object has no attribute 'get'` and crashed the initialization flow. Now handles string errors cleanly.
+
 ## [0.2.4] - 2026-07-04
 
 ### Fixed

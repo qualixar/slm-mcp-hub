@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slm-mcp-hub"
-version = "0.2.4"
+version = "0.2.5"
 description = "The first MCP gateway that learns, hot-reloads, and serves both stdio + HTTP natively — intelligent federation, zero-restart server lifecycle, native Claude Desktop integration, and learned routing for Model Context Protocol."
 readme = "README.md"
 license = {text = "AGPL-3.0-or-later"}

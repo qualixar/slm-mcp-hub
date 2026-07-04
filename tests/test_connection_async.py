@@ -594,6 +594,27 @@ class TestMCPConnectionDiscovery:
         assert c.capabilities["tools"] == []
         assert c.capabilities["resources"] == []
 
+    @pytest.mark.asyncio
+    async def test_send_request_http_handles_string_error(self):
+        """HTTP MCP returns an error field as a string (like {"error": "Unauthorized"}).
+        Before fix: err.get("code") raises AttributeError.
+        After fix: raises RuntimeError with code -1 and the error string.
+        """
+        c = MCPConnection(_cfg(transport="http", url="https://example.com/mcp"))
+        c._http_client = AsyncMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.headers = {"content-type": "application/json"}
+        mock_resp.json.return_value = {"error": "Unauthorized"}
+        c._http_client.post = AsyncMock(return_value=mock_resp)
+        c._http_url = "https://example.com/mcp"
+        c._http_session_id = None
+        c._request_id = 0
+
+        with pytest.raises(RuntimeError) as exc_info:
+            await c._send_request_http("initialize", {})
+        assert "test error: [-1] Unauthorized" in str(exc_info.value)
+
 
 # ===========================================================================
 # Regression: Bug #2 — HTTP notification posted to empty URL instead of server URL
