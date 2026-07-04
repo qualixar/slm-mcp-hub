@@ -70,13 +70,21 @@ def create_app(
                 content={"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}},
             )
 
-        # If no session_id and this is an initialize request, create session
+        # Always create/register a session on initialize.
+        # Some clients (e.g. Antigravity IDE) send their own mcp-session-id header on
+        # initialize. Previously the hub only created a session when NO header was
+        # provided, so the client-supplied ID was never registered — causing every
+        # subsequent call to fail with "Session not found".
         is_initialize = body.get("method") == "initialize"
-        if not session_id and is_initialize:
+        if is_initialize:
             client_info = body.get("params", {}).get("clientInfo", {})
-            session_id = session_manager.create_session(
-                client_name=client_info.get("name", "unknown"),
-            )
+            existing = session_manager.get_session(session_id) if session_id else None
+            if existing is None:
+                # Create session, honouring any client-supplied ID
+                session_id = session_manager.create_session(
+                    client_name=client_info.get("name", "unknown"),
+                    session_id=session_id or None,
+                )
 
         if not session_id:
             return JSONResponse(
@@ -84,7 +92,7 @@ def create_app(
                 content={"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32000, "message": "Missing Mcp-Session-Id header"}},
             )
 
-        # Verify session exists
+        # Verify session exists (for non-initialize requests)
         session = session_manager.get_session(session_id)
         if session is None and not is_initialize:
             return JSONResponse(

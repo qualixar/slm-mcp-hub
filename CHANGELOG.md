@@ -5,6 +5,13 @@ All notable changes to SLM MCP Hub will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.4] - 2026-07-04
+
+### Fixed
+- **[CRITICAL] Universal client compatibility — any IDE/agent now works** (`server/http_server.py`, `session/manager.py`): Sessions were never created when a client sent its own `Mcp-Session-Id` header on `initialize`. Any MCP client that provides its own session ID (Antigravity IDE, Cursor, Windsurf, GitHub Copilot Chat, custom agents) received `404 Session not found` on every subsequent call. The hub now always registers the session on `initialize`, honouring client-provided IDs. Claude Code (which lets the server generate the ID) was the only client unaffected. **5 regression tests added.**
+- **HTTP notification sent to empty URL** (`federation/connection.py`): `_send_notification_http` posted `notifications/initialized` to `""` instead of `self._http_url`, silently dropping the notification for all HTTP/SSE federated MCP servers. **2 regression tests added.**
+- **Non-dict capability result crashes server connection** (`federation/connection.py`): When an HTTP MCP server returns a bare string or list as the `result` of `tools/list`, `resources/list`, etc. (e.g. higgsfield returns `"pong"`), calling `.get()` raised `AttributeError: 'str' object has no attribute 'get'` — marking the server as permanently ERROR. Now degrades gracefully with a warning. **3 regression tests added.**
+
 ## [0.2.3] - 2026-06-07
 
 ### Added

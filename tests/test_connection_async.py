@@ -544,3 +544,90 @@ class TestMCPConnectionDiscovery:
         ])
         await c._discover_capabilities()
         assert c.capabilities["prompts"] == []
+
+    # ── Regression: Bug #3 — non-dict capability result (higgsfield pattern) ─
+
+    @pytest.mark.asyncio
+    async def test_discover_capabilities_handles_string_result_for_tools(self):
+        """Regression Bug #3: HTTP MCP returns a string for tools/list result.
+
+        Before fix: tools_result.get("tools", []) → AttributeError on str.
+        After fix: warns and leaves capabilities["tools"] as [].
+        """
+        c = MCPConnection(_cfg())
+        # tools/list returns a bare string (higgsfield-style response)
+        c._send_request = AsyncMock(side_effect=[
+            "pong",              # tools/list → non-dict
+            {"resources": []},
+            {"resourceTemplates": []},
+            {"prompts": []},
+        ])
+        # Must NOT raise — should degrade gracefully
+        await c._discover_capabilities()
+        assert c.capabilities["tools"] == []
+        assert c.capabilities["resources"] == []
+
+    @pytest.mark.asyncio
+    async def test_discover_capabilities_handles_list_result(self):
+        """Regression Bug #3: result is a list instead of dict."""
+        c = MCPConnection(_cfg())
+        c._send_request = AsyncMock(side_effect=[
+            [{"name": "tool1"}],   # wrong: list instead of {"tools": [...]}
+            {"resources": []},
+            {"resourceTemplates": []},
+            {"prompts": []},
+        ])
+        await c._discover_capabilities()
+        assert c.capabilities["tools"] == []   # degraded, not crashed
+
+    @pytest.mark.asyncio
+    async def test_discover_capabilities_handles_none_result(self):
+        """Regression Bug #3: result is None (some servers return null)."""
+        c = MCPConnection(_cfg())
+        c._send_request = AsyncMock(side_effect=[
+            None,
+            None,
+            None,
+            None,
+        ])
+        await c._discover_capabilities()
+        assert c.capabilities["tools"] == []
+        assert c.capabilities["resources"] == []
+
+
+# ===========================================================================
+# Regression: Bug #2 — HTTP notification posted to empty URL instead of server URL
+# ===========================================================================
+
+class TestSendNotificationHTTP:
+    @pytest.mark.asyncio
+    async def test_send_notification_http_uses_server_url(self):
+        """Regression Bug #2: _send_notification_http must post to self._http_url, not ''.
+
+        Before fix: await self._http_client.post("", ...) → posts to wrong URL.
+        After fix: await self._http_client.post(self._http_url, ...) → correct.
+        """
+        c = MCPConnection(_cfg(name="http-srv", transport="http", url="https://api.example.com/mcp"))
+        # Inject a fake http client
+        mock_client = AsyncMock()
+        c._http_client = mock_client
+        c._http_url = "https://api.example.com/mcp"
+        c._http_session_id = "test-session"
+
+        await c._send_notification_http("notifications/initialized", {})
+
+        # Verify post was called with the actual server URL, not ""
+        call_args = mock_client.post.call_args
+        assert call_args is not None, "http_client.post was not called"
+        url_arg = call_args[0][0] if call_args[0] else call_args[1].get("url", "")
+        assert url_arg == "https://api.example.com/mcp", (
+            f"Expected URL 'https://api.example.com/mcp', got '{url_arg}'"
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_notification_http_noop_when_no_client(self):
+        """No client → silently skips (original correct behaviour preserved)."""
+        c = MCPConnection(_cfg(name="http-srv", transport="http", url="https://example.com/mcp"))
+        # No _http_client attribute
+        await c._send_notification_http("notifications/initialized", {})
+        # Should not raise

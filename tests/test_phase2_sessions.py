@@ -491,3 +491,96 @@ class TestHTTPServer:
         resp = client.get("/api/health")
         assert resp.status_code == 200
         assert resp.json()["status"] == "ok"
+
+    # ── Regression tests for v0.2.4 session ID bug ──────────────────────────
+
+    def test_mcp_initialize_with_client_provided_session_id(self):
+        """Regression: client sends its own mcp-session-id on initialize.
+
+        Bug (v0.2.3): the hub only created a session when NO header was present.
+        If a client (e.g. Antigravity IDE) sent its own ID, the session was never
+        registered and every subsequent call failed with 404 Session Not Found.
+
+        Fix (v0.2.4): always create/register a session on initialize, honouring
+        any client-supplied session ID.
+        """
+        client, _ = self._make_client()
+        client_session_id = "antigravity-fixed-session-abc123"
+
+        # Initialize WITH a client-provided session ID
+        init_resp = client.post("/mcp", json={
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                       "clientInfo": {"name": "Antigravity IDE"}},
+        }, headers={"Mcp-Session-Id": client_session_id})
+        assert init_resp.status_code == 200, f"Initialize failed: {init_resp.json()}"
+        # Hub must echo back the session ID
+        assert init_resp.headers.get("Mcp-Session-Id") == client_session_id
+
+        # Immediately call tools/list with the SAME session ID — must NOT 404
+        tools_resp = client.post("/mcp", json={
+            "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
+        }, headers={"Mcp-Session-Id": client_session_id})
+        assert tools_resp.status_code == 200, (
+            f"tools/list failed with status {tools_resp.status_code}: {tools_resp.json()}"
+        )
+        tools = tools_resp.json()["result"]["tools"]
+        names = [t["name"] for t in tools]
+        assert "search_tools" in names
+        assert "call_tool" in names
+
+    def test_mcp_initialize_creates_session_when_id_provided(self):
+        """Session is stored in the manager when client provides its own ID."""
+        client, sm = self._make_client()
+        client_id = "my-explicit-session-id"
+
+        client.post("/mcp", json={
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                       "clientInfo": {"name": "TestIDE"}},
+        }, headers={"Mcp-Session-Id": client_id})
+
+        # Session must exist in the manager
+        session = sm.get_session(client_id)
+        assert session is not None, "Session not found in manager after initialize with client-provided ID"
+        assert session.client_name == "TestIDE"
+
+    def test_mcp_reinitialize_same_id_is_idempotent(self):
+        """Re-initializing with the same session ID doesn't duplicate or error."""
+        client, sm = self._make_client()
+        client_id = "reused-session-id"
+
+        for i in range(2):
+            resp = client.post("/mcp", json={
+                "jsonrpc": "2.0", "id": i + 1, "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                           "clientInfo": {"name": "TestIDE"}},
+            }, headers={"Mcp-Session-Id": client_id})
+            assert resp.status_code == 200
+
+        # Still only one session with this ID
+        assert sm.active_count == 1
+
+
+# ===========================================================================
+# Session Manager — explicit session_id tests
+# ===========================================================================
+
+class TestSessionManagerExplicitId:
+    def test_create_session_with_explicit_id(self):
+        """create_session(session_id=...) stores and returns the provided ID."""
+        sm = SessionManager()
+        explicit_id = "my-client-session-xyz"
+        returned = sm.create_session(client_name="IDE", session_id=explicit_id)
+        assert returned == explicit_id
+        info = sm.get_session(explicit_id)
+        assert info is not None
+        assert info.session_id == explicit_id
+        assert info.client_name == "IDE"
+
+    def test_create_session_without_explicit_id_generates_uuid(self):
+        """Without session_id, a UUID is auto-generated (backward compat)."""
+        sm = SessionManager()
+        sid = sm.create_session(client_name="Test")
+        assert len(sid) == 36  # standard UUID length
+        assert sm.get_session(sid) is not None

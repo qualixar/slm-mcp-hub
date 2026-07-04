@@ -317,25 +317,36 @@ class MCPConnection:
         """Discover all tools, resources, and prompts from the MCP server."""
         try:
             tools_result = await self._send_request("tools/list", {})
-            self._capabilities["tools"] = tools_result.get("tools", [])
+            # Guard: some HTTP MCPs return a non-dict result (e.g. a bare string).
+            # Calling .get() on a str raises AttributeError and marks the server ERROR.
+            if isinstance(tools_result, dict):
+                self._capabilities["tools"] = tools_result.get("tools", [])
+            else:
+                logger.warning(
+                    "tools/list for %s returned unexpected type %s — treating as no tools",
+                    self.name, type(tools_result).__name__,
+                )
         except Exception as exc:
             logger.warning("Failed to list tools for %s: %s", self.name, exc)
 
         try:
             res_result = await self._send_request("resources/list", {})
-            self._capabilities["resources"] = res_result.get("resources", [])
+            if isinstance(res_result, dict):
+                self._capabilities["resources"] = res_result.get("resources", [])
         except Exception as exc:
             logger.debug("No resources for %s: %s", self.name, exc)
 
         try:
             tmpl_result = await self._send_request("resources/templates/list", {})
-            self._capabilities["resource_templates"] = tmpl_result.get("resourceTemplates", [])
+            if isinstance(tmpl_result, dict):
+                self._capabilities["resource_templates"] = tmpl_result.get("resourceTemplates", [])
         except Exception as exc:
             logger.debug("No resource templates for %s: %s", self.name, exc)
 
         try:
             prompts_result = await self._send_request("prompts/list", {})
-            self._capabilities["prompts"] = prompts_result.get("prompts", [])
+            if isinstance(prompts_result, dict):
+                self._capabilities["prompts"] = prompts_result.get("prompts", [])
         except Exception as exc:
             logger.debug("No prompts for %s: %s", self.name, exc)
 
@@ -484,7 +495,7 @@ class MCPConnection:
             headers["Mcp-Session-Id"] = self._http_session_id
 
         try:
-            await self._http_client.post("", json=message, headers=headers)
+            await self._http_client.post(self._http_url, json=message, headers=headers)
         except Exception:
             pass  # Notifications don't require response
 

@@ -1,6 +1,6 @@
 {
   "name": "slm-mcp-hub",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "The first MCP gateway that learns, hot-reloads, and serves both stdio + HTTP natively. Zero-restart server lifecycle, native Claude Desktop integration, intelligent federation, and learned routing for Model Context Protocol.",
   "keywords": [
     "mcp",

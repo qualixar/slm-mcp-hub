@@ -54,8 +54,13 @@ class SessionManager:
         client_name: str = "unknown",
         project_path: str = "",
         permissions: dict[str, Any] | None = None,
+        session_id: str | None = None,
     ) -> str:
         """Create a new session and return the session_id.
+
+        Args:
+            session_id: Optional client-provided session ID to reuse.
+                        If None, a new UUID is generated.
 
         Raises ValueError if max sessions reached.
         """
@@ -67,7 +72,7 @@ class SessionManager:
                 "Close an existing session first."
             )
 
-        session_id = str(uuid.uuid4())
+        session_id = session_id or str(uuid.uuid4())
         now = time.time()
         info = SessionInfo(
             session_id=session_id,
