@@ -42,6 +42,11 @@ class MCPConnection:
             "resource_templates": [],
             "prompts": [],
         }
+        # Capabilities the server advertised in its initialize response, used to
+        # gate optional resources/prompts discovery probes. None means "not
+        # captured" (e.g. direct unit-test calls), in which case we fall back to
+        # probing everything for backward compatibility.
+        self._server_capabilities: dict[str, Any] | None = None
         self._request_id = 0
         self._pending: dict[int, asyncio.Future[dict]] = {}
         self._reader_task: asyncio.Task | None = None
@@ -252,6 +257,11 @@ class MCPConnection:
             # Send initialized notification (no response expected)
             await self._send_notification("notifications/initialized", {})
 
+            # Record advertised capabilities so discovery only probes what the
+            # server supports (see _discover_capabilities).
+            caps = init_result.get("capabilities") if isinstance(init_result, dict) else None
+            self._server_capabilities = caps if isinstance(caps, dict) else None
+
             # Discover capabilities
             await self._discover_capabilities()
 
@@ -298,6 +308,12 @@ class MCPConnection:
             })
 
             await self._send_notification("notifications/initialized", {})
+
+            # Record advertised capabilities so discovery only probes what the
+            # server supports (see _discover_capabilities).
+            caps = init_result.get("capabilities") if isinstance(init_result, dict) else None
+            self._server_capabilities = caps if isinstance(caps, dict) else None
+
             await self._discover_capabilities()
 
             self._state = ConnectionState.CONNECTED
@@ -319,7 +335,17 @@ class MCPConnection:
             ) from None
 
     async def _discover_capabilities(self) -> None:
-        """Discover all tools, resources, and prompts from the MCP server."""
+        """Discover tools, resources, and prompts from the MCP server.
+
+        Optional resources/prompts probes are gated on the capabilities the
+        server advertised in its initialize response. Some servers (e.g. the
+        GitLab MCP server) return HTTP 404 for methods they don't support, and
+        some proxies (e.g. mcp-remote) fail to relay that as a JSON-RPC error —
+        leaving the request future unresolved and hanging the connect until the
+        federation timeout. Respecting advertised capabilities avoids probing
+        unsupported methods entirely. When capabilities weren't captured
+        (``_server_capabilities is None``), fall back to probing everything.
+        """
         try:
             tools_result = await self._send_request("tools/list", {})
             # Guard: some HTTP MCPs return a non-dict result (e.g. a bare string).
@@ -334,26 +360,36 @@ class MCPConnection:
         except Exception as exc:
             logger.warning("Failed to list tools for %s: %s", self.name, exc)
 
-        try:
-            res_result = await self._send_request("resources/list", {})
-            if isinstance(res_result, dict):
-                self._capabilities["resources"] = res_result.get("resources", [])
-        except Exception as exc:
-            logger.debug("No resources for %s: %s", self.name, exc)
+        server_caps = self._server_capabilities
+        probe_resources = server_caps is None or "resources" in server_caps
+        probe_prompts = server_caps is None or "prompts" in server_caps
 
-        try:
-            tmpl_result = await self._send_request("resources/templates/list", {})
-            if isinstance(tmpl_result, dict):
-                self._capabilities["resource_templates"] = tmpl_result.get("resourceTemplates", [])
-        except Exception as exc:
-            logger.debug("No resource templates for %s: %s", self.name, exc)
+        if probe_resources:
+            try:
+                res_result = await self._send_request("resources/list", {})
+                if isinstance(res_result, dict):
+                    self._capabilities["resources"] = res_result.get("resources", [])
+            except Exception as exc:
+                logger.debug("No resources for %s: %s", self.name, exc)
 
-        try:
-            prompts_result = await self._send_request("prompts/list", {})
-            if isinstance(prompts_result, dict):
-                self._capabilities["prompts"] = prompts_result.get("prompts", [])
-        except Exception as exc:
-            logger.debug("No prompts for %s: %s", self.name, exc)
+            try:
+                tmpl_result = await self._send_request("resources/templates/list", {})
+                if isinstance(tmpl_result, dict):
+                    self._capabilities["resource_templates"] = tmpl_result.get("resourceTemplates", [])
+            except Exception as exc:
+                logger.debug("No resource templates for %s: %s", self.name, exc)
+        else:
+            logger.debug("%s did not advertise resources — skipping resources discovery", self.name)
+
+        if probe_prompts:
+            try:
+                prompts_result = await self._send_request("prompts/list", {})
+                if isinstance(prompts_result, dict):
+                    self._capabilities["prompts"] = prompts_result.get("prompts", [])
+            except Exception as exc:
+                logger.debug("No prompts for %s: %s", self.name, exc)
+        else:
+            logger.debug("%s did not advertise prompts — skipping prompts discovery", self.name)
 
     async def _send_request(self, method: str, params: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
         """Send a JSON-RPC request and wait for the response.

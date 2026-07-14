@@ -460,7 +460,10 @@ class TestMCPConnectionStdioHandshake:
             nonlocal call_count
             call_count += 1
             if method == "initialize":
-                return {"protocolVersion": "2024-11-05"}
+                return {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                }
             elif method == "tools/list":
                 return {"tools": [{"name": "t1"}]}
             elif method == "resources/list":
@@ -486,7 +489,7 @@ class TestMCPConnectionStdioHandshake:
         assert c.is_connected is True
         assert len(c.capabilities["tools"]) == 1
         assert c._connected_at > 0
-        assert call_count >= 5  # init + 4 discover calls
+        assert call_count == 2  # initialize + advertised tools/list
 
         await c.disconnect()
 
@@ -640,6 +643,61 @@ class TestMCPConnectionDiscovery:
         await c._discover_capabilities()
         assert c.capabilities["tools"] == []
         assert c.capabilities["resources"] == []
+
+    @pytest.mark.asyncio
+    async def test_discover_skips_unadvertised_resources_and_prompts(self):
+        """Regression: server advertising only `tools` must not be probed for
+        resources/prompts.
+
+        GitLab MCP advertises capabilities {"tools": {...}} and returns HTTP 404
+        for resources/list. Some proxies (mcp-remote) fail to relay that as a
+        JSON-RPC error, so the request future never resolves and the connect
+        hangs until the federation timeout. The fix gates optional probes on the
+        advertised capabilities, so unsupported methods are never called.
+        """
+        c = MCPConnection(_cfg())
+        c._server_capabilities = {"tools": {"listChanged": False}}
+        called: list[str] = []
+
+        async def mock_send(method, params):
+            called.append(method)
+            if method == "tools/list":
+                return {"tools": [{"name": "a"}]}
+            # Simulate the hang-inducing method: if it were ever called, the test
+            # would deadlock; instead fail loudly to prove it is never invoked.
+            raise AssertionError(f"unsupported method probed: {method}")
+
+        c._send_request = mock_send
+        await c._discover_capabilities()
+
+        assert called == ["tools/list"]
+        assert len(c.capabilities["tools"]) == 1
+        assert c.capabilities["resources"] == []
+        assert c.capabilities["prompts"] == []
+
+    @pytest.mark.asyncio
+    async def test_discover_probes_advertised_resources_and_prompts(self):
+        """When the server advertises resources/prompts, they are probed."""
+        c = MCPConnection(_cfg())
+        c._server_capabilities = {"tools": {}, "resources": {}, "prompts": {}}
+        called: list[str] = []
+
+        async def mock_send(method, params):
+            called.append(method)
+            return {
+                "tools/list": {"tools": []},
+                "resources/list": {"resources": [{"uri": "b"}]},
+                "resources/templates/list": {"resourceTemplates": []},
+                "prompts/list": {"prompts": [{"name": "d"}]},
+            }[method]
+
+        c._send_request = mock_send
+        await c._discover_capabilities()
+
+        assert "resources/list" in called
+        assert "prompts/list" in called
+        assert len(c.capabilities["resources"]) == 1
+        assert len(c.capabilities["prompts"]) == 1
 
     @pytest.mark.asyncio
     async def test_send_request_http_handles_string_error(self):
