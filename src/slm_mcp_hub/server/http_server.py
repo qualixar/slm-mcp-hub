@@ -77,12 +77,19 @@ def create_app(
         # subsequent call to fail with "Session not found".
         is_initialize = body.get("method") == "initialize"
         if is_initialize:
-            client_info = body.get("params", {}).get("clientInfo", {})
+            # Defensive: a malformed client may send a non-object 'params' or
+            # 'clientInfo'. This runs before handle_jsonrpc's validation, so it
+            # must not assume either is a dict.
+            raw_params = body.get("params")
+            raw_client_info = raw_params.get("clientInfo") if isinstance(raw_params, dict) else None
+            client_info = raw_client_info if isinstance(raw_client_info, dict) else {}
+            raw_name = client_info.get("name")
+            client_name = raw_name if isinstance(raw_name, str) and raw_name.strip() else "unknown"
             existing = session_manager.get_session(session_id) if session_id else None
             if existing is None:
                 # Create session, honouring any client-supplied ID
                 session_id = session_manager.create_session(
-                    client_name=client_info.get("name", "unknown"),
+                    client_name=client_name,
                     session_id=session_id or None,
                 )
 
