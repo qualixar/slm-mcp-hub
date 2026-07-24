@@ -25,6 +25,17 @@ logger = logging.getLogger(__name__)
 # arguments of the tool being invoked.
 _RESERVED_META_KEYS = frozenset({"tool", "arguments"})
 
+# Guards against a client nesting call_tool inside call_tool indefinitely.
+_MAX_META_DEPTH = 4
+
+
+class InvalidParams(ValueError):
+    """Structurally invalid client params — reported as JSON-RPC -32602.
+
+    Distinct from a tool that ran and failed, which is reported as an
+    ``isError`` result rather than a protocol error.
+    """
+
 
 def _coerce_object(value: Any) -> tuple[dict[str, Any] | None, str | None]:
     """Coerce a JSON-object-ish value into a dict.
@@ -43,6 +54,8 @@ def _coerce_object(value: Any) -> tuple[dict[str, Any] | None, str | None]:
             value = json.loads(text)
         except json.JSONDecodeError as exc:
             return None, f"it is a string but not valid JSON ({exc})"
+        if value is None:
+            return {}, None
 
     if isinstance(value, dict):
         return value, None
@@ -196,14 +209,16 @@ class MCPEndpoint:
         "hub__list_servers": "list_servers",
     }
 
-    async def _handle_meta_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _handle_meta_tool(
+        self, name: str, arguments: dict[str, Any], depth: int = 0
+    ) -> dict[str, Any]:
         """Handle Meta-MCP hub meta-tools."""
         name = self._META_TOOL_ALIASES.get(name, name)
         if name == "search_tools":
             return await self._meta_search_tools(arguments)
 
         if name == "call_tool":
-            return await self._meta_call_tool(arguments)
+            return await self._meta_call_tool(arguments, depth=depth)
 
         if name == "list_servers":
             return await self._meta_list_servers()
@@ -217,22 +232,33 @@ class MCPEndpoint:
         appear in the tool name, description, or server name.
         'github search' matches 'github__search_repositories'.
         """
-        query = arguments.get("query", "").lower()
+        query = arguments.get("query")
+        if query is None:
+            query = ""
+        if not isinstance(query, str):
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"Error: 'query' must be a string, got {type(query).__name__}.",
+                }],
+                "isError": True,
+            }
+        query = query.lower()
         query_words = query.split()
         all_tools = self._registry.list_tools()
 
         matches = []
         for t in all_tools:
-            name = t.get("name", "").lower()
-            desc = t.get("description", "").lower()
+            name = (t.get("name") or "").lower()
+            desc = (t.get("description") or "").lower()
             searchable = f"{name} {desc} {name.replace('__', ' ').replace('_', ' ')}"
             if all(word in searchable for word in query_words):
                 server = t["name"].split("__", 1)[0] if "__" in t["name"] else "unknown"
                 matches.append({
                     "tool": t["name"],
                     "server": server,
-                    "description": t.get("description", ""),
-                    "inputSchema": t.get("inputSchema", {}),
+                    "description": t.get("description") or "",
+                    "inputSchema": t.get("inputSchema") or {},
                 })
 
         result = {
@@ -242,15 +268,31 @@ class MCPEndpoint:
         }
         return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
 
-    async def _meta_call_tool(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _meta_call_tool(self, arguments: dict[str, Any], depth: int = 0) -> dict[str, Any]:
         """Call any tool through the hub — the universal tool router."""
-        tool_name = arguments.get("tool", "")
-
-        if not tool_name:
+        if depth >= _MAX_META_DEPTH:
             return {
-                "content": [{"type": "text", "text": "Error: 'tool' parameter is required. Use search_tools to find tool names."}],
+                "content": [{
+                    "type": "text",
+                    "text": f"Error: call_tool nesting exceeded {_MAX_META_DEPTH} levels. "
+                            "Call the target tool directly.",
+                }],
                 "isError": True,
             }
+
+        tool_name = arguments.get("tool")
+
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            got = "missing" if tool_name is None else f"got {type(tool_name).__name__}"
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": f"Error: 'tool' parameter is required and must be a non-empty string ({got}). "
+                            "Use search_tools to find tool names.",
+                }],
+                "isError": True,
+            }
+        tool_name = tool_name.strip()
 
         tool_args, arg_error = _normalise_tool_arguments(arguments)
         if arg_error is not None:
@@ -263,7 +305,7 @@ class MCPEndpoint:
         # through the federation router (which doesn't know about meta-tools).
         resolved = self._META_TOOL_ALIASES.get(tool_name, tool_name)
         if resolved in ("search_tools", "call_tool", "list_servers"):
-            return await self._handle_meta_tool(resolved, tool_args)
+            return await self._handle_meta_tool(resolved, tool_args, depth=depth + 1)
 
         start = time.time()
         result = await self._router.route_tool_call(tool_name, tool_args)
@@ -314,6 +356,12 @@ class MCPEndpoint:
         """Handle tools/call — route to correct MCP server or handle meta-tools."""
         self._session_manager.touch(session_id)
         name = params.get("name", "")
+        if not isinstance(name, str):
+            raise InvalidParams(f"'name' must be a string, got {type(name).__name__}")
+        if not name.strip():
+            raise InvalidParams("'name' is required")
+        name = name.strip()
+
         arguments, arg_error = _coerce_object(params.get("arguments"))
         if arg_error is not None:
             return {
@@ -403,9 +451,28 @@ class MCPEndpoint:
                 "error": {"code": -32601, "message": f"Method not found: {method}"},
             }
 
+        if params is None:
+            params = {}
+        if not isinstance(params, dict):
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {
+                    "code": -32602,
+                    "message": f"Invalid params: 'params' must be an object, got {type(params).__name__}",
+                },
+            }
+
         try:
             result = await handler(session_id, params)
             return {"jsonrpc": "2.0", "id": msg_id, "result": result}
+        except InvalidParams as exc:
+            logger.debug("Invalid params for %s: %s", method, exc)
+            return {
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "error": {"code": -32602, "message": f"Invalid params: {exc}"},
+            }
         except Exception as exc:
             logger.error("Handler error for %s: %s", method, exc)
             return {
