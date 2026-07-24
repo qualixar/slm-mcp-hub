@@ -21,6 +21,55 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Keys that belong to the call_tool envelope itself rather than to the
+# arguments of the tool being invoked.
+_RESERVED_META_KEYS = frozenset({"tool", "arguments"})
+
+
+def _coerce_object(value: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """Coerce a JSON-object-ish value into a dict.
+
+    Clients vary: some send a real object, some send it JSON-encoded as a
+    string. Returns (object, error_message); exactly one is non-None.
+    """
+    if value is None:
+        return {}, None
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}, None
+        try:
+            value = json.loads(text)
+        except json.JSONDecodeError as exc:
+            return None, f"it is a string but not valid JSON ({exc})"
+
+    if isinstance(value, dict):
+        return value, None
+
+    return None, f"expected an object, got {type(value).__name__}"
+
+
+def _normalise_tool_arguments(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+    """Extract the target tool's arguments from a call_tool payload.
+
+    Accepts the documented nested form, a JSON-encoded string, and the
+    flattened form some clients emit (arguments hoisted to the top level
+    alongside 'tool'). Returns (arguments, error_message).
+    """
+    nested, error = _coerce_object(payload.get("arguments"))
+    if error is not None:
+        return None, f"'arguments' is invalid: {error}"
+
+    # Flattened form: no nested arguments, but sibling keys are present.
+    if not nested:
+        flattened = {k: v for k, v in payload.items() if k not in _RESERVED_META_KEYS}
+        if flattened:
+            logger.debug("Accepted flattened call_tool arguments: %s", sorted(flattened))
+            return flattened, None
+
+    return nested, None
+
 
 class MCPEndpoint:
     """Federated MCP endpoint that serves multiple AI clients.
@@ -196,11 +245,17 @@ class MCPEndpoint:
     async def _meta_call_tool(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Call any tool through the hub — the universal tool router."""
         tool_name = arguments.get("tool", "")
-        tool_args = arguments.get("arguments", {})
 
         if not tool_name:
             return {
                 "content": [{"type": "text", "text": "Error: 'tool' parameter is required. Use search_tools to find tool names."}],
+                "isError": True,
+            }
+
+        tool_args, arg_error = _normalise_tool_arguments(arguments)
+        if arg_error is not None:
+            return {
+                "content": [{"type": "text", "text": f"Error calling '{tool_name}': {arg_error}"}],
                 "isError": True,
             }
 
@@ -259,7 +314,12 @@ class MCPEndpoint:
         """Handle tools/call — route to correct MCP server or handle meta-tools."""
         self._session_manager.touch(session_id)
         name = params.get("name", "")
-        arguments = params.get("arguments", {})
+        arguments, arg_error = _coerce_object(params.get("arguments"))
+        if arg_error is not None:
+            return {
+                "content": [{"type": "text", "text": f"Error calling '{name}': 'arguments' is invalid: {arg_error}"}],
+                "isError": True,
+            }
         name = self._META_TOOL_ALIASES.get(name, name)
 
         # Handle Meta-MCP tools locally (including unknown hub__ names)
