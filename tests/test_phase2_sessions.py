@@ -446,12 +446,17 @@ class TestHTTPServer:
         assert resp.status_code == 400
         assert "Missing" in resp.json()["error"]["message"]
 
-    def test_mcp_invalid_session_id(self):
-        client, _ = self._make_client()
+    def test_mcp_unknown_session_id_is_recovered(self):
+        # Contract change (see tests/test_session_recovery.py): an unknown
+        # session id is re-adopted rather than rejected with 404, so a client
+        # survives a hub restart. Strict-spec 404 is still reachable via
+        # SLM_HUB_SESSION_RECOVERY=0.
+        client, sm = self._make_client()
         resp = client.post("/mcp", json={
             "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {},
         }, headers={"Mcp-Session-Id": "invalid-uuid"})
-        assert resp.status_code == 404
+        assert resp.status_code == 200
+        assert sm.get_session("invalid-uuid") is not None
 
     def test_mcp_parse_error(self):
         client, _ = self._make_client()

@@ -5,6 +5,12 @@ All notable changes to SLM MCP Hub will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Session recovery — hub restarts are now invisible to clients** (`server/http_server.py`, `session/manager.py`): a non-`initialize` request carrying an unknown `Mcp-Session-Id` is now **re-adopted** instead of rejected with `404 Session not found`. Because a hub session holds no state that can't be rebuilt (routing, capability registry, and backend connections are all process-global), stranding a client after a hub bounce bought no safety — it left the connection dead until the *client* restarted. Recovery is logged at WARNING (once — the re-adopted session then exists, so later calls don't re-log) so restart churn stays visible. Controlled by the `SLM_HUB_SESSION_RECOVERY` environment variable (default **on**; set `0`/`false`/`no`/`off` to restore strict-spec `404`). At `MAX_SESSIONS`, recovery evicts the least-recently-active session rather than returning `500`.
+- **`DELETE /mcp` session termination** (`server/http_server.py`): the MCP Streamable-HTTP `DELETE` verb is now routed and returns `204 No Content`, idempotently (also `204` for an unknown or absent session id). Previously only `POST /mcp` was routed, so clients' session-cleanup path received `405`. `GET /mcp` intentionally remains `405` — the hub pushes no server-initiated SSE messages.
+
 ## [0.2.5] - 2026-07-04
 
 ### Fixed

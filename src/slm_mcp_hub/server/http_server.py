@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
@@ -19,6 +20,18 @@ from slm_mcp_hub.server.proxy_endpoint import ProxyEndpoint
 from slm_mcp_hub.session.manager import SessionManager
 
 logger = logging.getLogger(__name__)
+
+
+def _session_recovery_enabled() -> bool:
+    """Whether the hub re-adopts unknown session ids instead of returning 404.
+
+    Default on. Set SLM_HUB_SESSION_RECOVERY=0 (or false/no/off) to restore the
+    strict-spec behaviour. Read per-request so it can be toggled without a
+    restart.
+    """
+    return os.environ.get("SLM_HUB_SESSION_RECOVERY", "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
 
 
 def create_app(
@@ -95,10 +108,27 @@ def create_app(
         # Verify session exists (for non-initialize requests)
         session = session_manager.get_session(session_id)
         if session is None and not is_initialize:
-            return JSONResponse(
-                status_code=404,
-                content={"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32001, "message": "Session not found"}},
+            if not _session_recovery_enabled():
+                return JSONResponse(
+                    status_code=404,
+                    content={"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32001, "message": "Session not found"}},
+                )
+            # Re-adopt the unknown id and carry on. A hub session holds no state
+            # that can't be rebuilt (routing/registry/backends are all
+            # process-global), so rejecting a client after a hub restart buys no
+            # safety — it only strands them. WARNING (not INFO) so the restart
+            # churn we're masking stays visible in the log.
+            logger.warning(
+                "Recovering unknown session %s… (client restart or hub bounce)",
+                session_id[:8],
             )
+            try:
+                session_manager.create_session(client_name="recovered", session_id=session_id)
+            except ValueError:
+                # At MAX_SESSIONS — evict the least-recently-active session
+                # (churn, not real demand, is why we're full) and retry once.
+                session_manager.evict_oldest()
+                session_manager.create_session(client_name="recovered", session_id=session_id)
 
         result = await mcp_endpoint.handle_jsonrpc(session_id, body)
 
@@ -107,6 +137,23 @@ def create_app(
 
         headers = {"Mcp-Session-Id": session_id}
         return JSONResponse(content=result, headers=headers)
+
+    @app.delete(MCP_ENDPOINT_PATH)
+    async def mcp_delete(request: Request) -> Response:
+        """Terminate a session (MCP Streamable HTTP DELETE).
+
+        Idempotent: returns 204 even for an unknown or absent session id —
+        clients use this purely for cleanup, so a missing session is success,
+        not an error. (Previously DELETE was unrouted and returned 405, which
+        broke clients' recovery/cleanup path.)
+
+        Note: GET /mcp intentionally stays 405 — the hub pushes no
+        server-initiated SSE messages, so there is no stream to open.
+        """
+        session_id = request.headers.get("mcp-session-id", "")
+        if session_id:
+            session_manager.destroy_session(session_id)
+        return Response(status_code=204)
 
     # ── Management API ───────────────────────────────────────────────────
 

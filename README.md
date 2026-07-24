@@ -243,6 +243,8 @@ Hub config: `~/.slm-mcp-hub/config.json`
 
 Environment overrides: `SLM_HUB_PORT`, `SLM_HUB_HOST`, `SLM_HUB_LOG_LEVEL`, `SLM_HUB_CONFIG_DIR`, `SLM_DAEMON_URL`.
 
+Session recovery: `SLM_HUB_SESSION_RECOVERY` (default **on**) — the hub re-adopts an unknown `Mcp-Session-Id` instead of returning `404`, so clients survive a hub restart without re-initializing. Set to `0`/`false`/`no`/`off` for strict-spec behaviour. Clients may terminate a session with `DELETE /mcp` (idempotent `204`).
+
 Secrets: `~/.claude-secrets.env` (shared with Claude Code). All `${VAR}` placeholders resolve on startup.
 
 ---

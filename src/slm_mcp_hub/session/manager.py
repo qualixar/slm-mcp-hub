@@ -120,6 +120,19 @@ class SessionManager:
         """Destroy a session. Returns True if it existed."""
         return self._remove(session_id)
 
+    def evict_oldest(self) -> str | None:
+        """Remove the least-recently-active session; return its id (or None if empty).
+
+        Used by session recovery to make room when MAX_SESSIONS is reached: a
+        stale session is a better eviction candidate than refusing to serve a
+        live client after a hub restart.
+        """
+        if not self._sessions:
+            return None
+        oldest = min(self._sessions.values(), key=lambda s: s.last_activity)
+        self._remove(oldest.session_id)
+        return oldest.session_id
+
     def list_sessions(self) -> list[SessionInfo]:
         """Return all active (non-expired) sessions."""
         self._cleanup_expired()
