@@ -25,10 +25,6 @@ logger = logging.getLogger(__name__)
 # arguments of the tool being invoked.
 _RESERVED_META_KEYS = frozenset({"tool", "arguments"})
 
-# Guards against a client nesting call_tool inside call_tool indefinitely.
-_MAX_META_DEPTH = 4
-
-
 class InvalidParams(ValueError):
     """Structurally invalid client params — reported as JSON-RPC -32602.
 
@@ -52,7 +48,11 @@ def _coerce_object(value: Any) -> tuple[dict[str, Any] | None, str | None]:
             return {}, None
         try:
             value = json.loads(text)
-        except json.JSONDecodeError as exc:
+        except (ValueError, RecursionError) as exc:
+            # JSONDecodeError subclasses ValueError; a bare ValueError also
+            # escapes json.loads for syntactically valid but unrepresentable
+            # input (e.g. Python 3.11+ integer digit limits), and pathological
+            # nesting raises RecursionError.
             return None, f"it is a string but not valid JSON ({exc})"
         if value is None:
             return {}, None
@@ -69,19 +69,32 @@ def _normalise_tool_arguments(payload: dict[str, Any]) -> tuple[dict[str, Any] |
     Accepts the documented nested form, a JSON-encoded string, and the
     flattened form some clients emit (arguments hoisted to the top level
     alongside 'tool'). Returns (arguments, error_message).
+
+    An explicit 'arguments' key always wins, even when it is empty or null.
+    Selecting on emptiness instead of presence would let unrelated sibling
+    keys silently redefine a deliberately argument-less call.
     """
-    nested, error = _coerce_object(payload.get("arguments"))
-    if error is not None:
-        return None, f"'arguments' is invalid: {error}"
+    if "arguments" in payload:
+        nested, error = _coerce_object(payload["arguments"])
+        if error is not None:
+            return None, f"'arguments' is invalid: {error}"
+        stray = sorted(k for k in payload if k not in _RESERVED_META_KEYS)
+        if stray:
+            logger.info(
+                "call_tool for %r supplied both 'arguments' and top-level keys %s; "
+                "ignoring the top-level keys",
+                payload.get("tool"), stray,
+            )
+        return nested, None
 
-    # Flattened form: no nested arguments, but sibling keys are present.
-    if not nested:
-        flattened = {k: v for k, v in payload.items() if k not in _RESERVED_META_KEYS}
-        if flattened:
-            logger.debug("Accepted flattened call_tool arguments: %s", sorted(flattened))
-            return flattened, None
-
-    return nested, None
+    flattened = {k: v for k, v in payload.items() if k not in _RESERVED_META_KEYS}
+    if flattened:
+        logger.info(
+            "call_tool for %r used the flattened argument form (keys %s); "
+            "the documented form nests them under 'arguments'",
+            payload.get("tool"), sorted(flattened),
+        )
+    return flattened, None
 
 
 class MCPEndpoint:
@@ -209,16 +222,14 @@ class MCPEndpoint:
         "hub__list_servers": "list_servers",
     }
 
-    async def _handle_meta_tool(
-        self, name: str, arguments: dict[str, Any], depth: int = 0
-    ) -> dict[str, Any]:
+    async def _handle_meta_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle Meta-MCP hub meta-tools."""
         name = self._META_TOOL_ALIASES.get(name, name)
         if name == "search_tools":
             return await self._meta_search_tools(arguments)
 
         if name == "call_tool":
-            return await self._meta_call_tool(arguments, depth=depth)
+            return await self._meta_call_tool(arguments)
 
         if name == "list_servers":
             return await self._meta_list_servers()
@@ -268,18 +279,8 @@ class MCPEndpoint:
         }
         return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
 
-    async def _meta_call_tool(self, arguments: dict[str, Any], depth: int = 0) -> dict[str, Any]:
+    async def _meta_call_tool(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Call any tool through the hub — the universal tool router."""
-        if depth >= _MAX_META_DEPTH:
-            return {
-                "content": [{
-                    "type": "text",
-                    "text": f"Error: call_tool nesting exceeded {_MAX_META_DEPTH} levels. "
-                            "Call the target tool directly.",
-                }],
-                "isError": True,
-            }
-
         tool_name = arguments.get("tool")
 
         if not isinstance(tool_name, str) or not tool_name.strip():
@@ -304,8 +305,18 @@ class MCPEndpoint:
         # Bug C fix: handle meta-tool calls locally instead of routing
         # through the federation router (which doesn't know about meta-tools).
         resolved = self._META_TOOL_ALIASES.get(tool_name, tool_name)
-        if resolved in ("search_tools", "call_tool", "list_servers"):
-            return await self._handle_meta_tool(resolved, tool_args, depth=depth + 1)
+        if resolved == "call_tool":
+            # Self-routing adds no capability and is unbounded if allowed.
+            return {
+                "content": [{
+                    "type": "text",
+                    "text": "Error: call_tool cannot invoke itself. Set 'tool' to the "
+                            "name of the tool you want to run.",
+                }],
+                "isError": True,
+            }
+        if resolved in ("search_tools", "list_servers"):
+            return await self._handle_meta_tool(resolved, tool_args)
 
         start = time.time()
         result = await self._router.route_tool_call(tool_name, tool_args)

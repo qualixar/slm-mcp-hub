@@ -104,9 +104,27 @@ class TestNormaliseToolArguments:
     def test_no_arguments_at_all_is_empty(self):
         assert _normalise_tool_arguments({"tool": "jira__get_issue"}) == ({}, None)
 
-    def test_empty_nested_with_siblings_uses_siblings(self):
-        payload = {"tool": "jira__get_issue", "arguments": {}, "issue_key": "A-1"}
-        assert _normalise_tool_arguments(payload) == ({"issue_key": "A-1"}, None)
+    def test_explicit_empty_arguments_beats_siblings(self):
+        """An explicit 'arguments' key wins even when empty.
+
+        Selecting the flattened form on emptiness rather than key presence
+        let unrelated sibling keys silently redefine a deliberately
+        argument-less call — the same silent-wrong-call class this module
+        exists to prevent.
+        """
+        payload = {"tool": "jira__get_issue", "arguments": {}, "reasoning": "because"}
+        assert _normalise_tool_arguments(payload) == ({}, None)
+
+    @pytest.mark.parametrize("empty", [{}, None, "null", "", "{}"])
+    def test_present_but_empty_arguments_never_flattens(self, empty):
+        payload = {"tool": "jira__get_issue", "arguments": empty, "stray": "leak"}
+        assert _normalise_tool_arguments(payload) == ({}, None)
+
+    def test_invalid_arguments_is_not_rescued_by_siblings(self):
+        payload = {"tool": "jira__get_issue", "arguments": "{bad", "stray": "leak"}
+        args, error = _normalise_tool_arguments(payload)
+        assert args is None
+        assert "'arguments' is invalid" in error
 
     def test_invalid_arguments_reports_error(self):
         args, error = _normalise_tool_arguments({"tool": "x", "arguments": "{bad"})
@@ -382,22 +400,54 @@ class TestMalformedInputHardening:
         router.route_tool_call.assert_awaited_once_with("jira__get_issue", {})
 
 
-class TestMetaRecursionGuard:
-    async def test_deeply_nested_call_tool_is_rejected(self):
-        endpoint, session_id, router = _make_endpoint()
-        payload = {"tool": "jira__get_issue", "arguments": {"key": "X-1"}}
-        for _ in range(50):
-            payload = {"tool": "call_tool", "arguments": payload}
-        result = await _call(endpoint, session_id, payload)
-        assert result["isError"] is True
-        assert "nesting exceeded" in result["content"][0]["text"]
-        router.route_tool_call.assert_not_awaited()
+class TestAdversarialReviewFindings:
+    """Regressions for defects found by adversarial review of the first two commits."""
 
-    async def test_shallow_nesting_still_works(self):
+    async def test_explicit_empty_arguments_does_not_leak_siblings_to_router(self):
+        endpoint, session_id, router = _make_endpoint()
+        result = await _call(endpoint, session_id, {
+            "tool": "jira__get_issue", "arguments": {}, "reasoning": "model chatter",
+        })
+        assert "isError" not in result
+        router.route_tool_call.assert_awaited_once_with("jira__get_issue", {})
+
+    async def test_nested_arguments_win_over_siblings(self):
+        endpoint, session_id, router = _make_endpoint()
+        await _call(endpoint, session_id, {
+            "tool": "jira__get_issue", "arguments": {"key": "REAL"}, "key": "STRAY",
+        })
+        router.route_tool_call.assert_awaited_once_with("jira__get_issue", {"key": "REAL"})
+
+    def test_oversized_integer_string_is_an_argument_error_not_a_crash(self):
+        """Python's integer digit limit raises a bare ValueError, not JSONDecodeError."""
+        payload = '{"x": ' + "1" * 5000 + "}"
+        args, error = _coerce_object(payload)
+        assert args is None
+        assert "not valid JSON" in error
+
+    def test_deeply_nested_json_string_is_an_argument_error_not_a_crash(self):
+        args, error = _coerce_object("[" * 200_000 + "]" * 200_000)
+        assert args is None
+        assert "not valid JSON" in error
+
+    async def test_call_tool_cannot_invoke_itself(self):
         endpoint, session_id, router = _make_endpoint()
         result = await _call(endpoint, session_id, {
             "tool": "call_tool",
             "arguments": {"tool": "jira__get_issue", "arguments": {"key": "X-1"}},
         })
+        assert result["isError"] is True
+        assert "cannot invoke itself" in result["content"][0]["text"]
+        router.route_tool_call.assert_not_awaited()
+
+    async def test_call_tool_cannot_invoke_itself_via_alias(self):
+        endpoint, session_id, _ = _make_endpoint()
+        result = await _call(endpoint, session_id, {"tool": "hub__call_tool", "arguments": {}})
+        assert result["isError"] is True
+        assert "cannot invoke itself" in result["content"][0]["text"]
+
+    async def test_call_tool_may_still_invoke_other_meta_tools(self):
+        endpoint, session_id, _ = _make_endpoint()
+        result = await _call(endpoint, session_id, {"tool": "search_tools", "query": "jira"})
         assert "isError" not in result
-        router.route_tool_call.assert_awaited_once_with("jira__get_issue", {"key": "X-1"})
+        assert '"found": 1' in result["content"][0]["text"]
