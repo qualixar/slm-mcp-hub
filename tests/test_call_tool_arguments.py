@@ -278,3 +278,126 @@ class TestPluginNotification:
 
         kwargs = hub.notify_plugins_tool_call_after.await_args.kwargs
         assert kwargs["tool"] == "bare_tool"
+
+
+class TestMalformedInputHardening:
+    """Client input errors must be reported as -32602, never as -32603.
+
+    Before this hardening, a non-string tool name, a non-dict ``params``,
+    or a non-string ``query`` raised ``AttributeError``/``TypeError`` deep
+    inside the handler and surfaced as an opaque "Internal server error".
+    """
+
+    @pytest.mark.parametrize("bad_name", [123, ["a"], {"a": 1}, None, True])
+    async def test_non_string_outer_name_is_invalid_params(self, bad_name):
+        endpoint, session_id, _ = _make_endpoint()
+        response = await endpoint.handle_jsonrpc(session_id, {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": bad_name},
+        })
+        assert response["error"]["code"] == -32602
+        assert "must be a string" in response["error"]["message"]
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    async def test_blank_outer_name_is_invalid_params(self, blank):
+        endpoint, session_id, _ = _make_endpoint()
+        response = await endpoint.handle_jsonrpc(session_id, {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": blank},
+        })
+        assert response["error"]["code"] == -32602
+        assert "required" in response["error"]["message"]
+
+    async def test_outer_name_is_stripped(self):
+        endpoint, session_id, router = _make_endpoint()
+        await endpoint.handle_tools_call(session_id, {
+            "name": "  jira__get_issue  ", "arguments": {"key": "X-1"},
+        })
+        router.route_tool_call.assert_awaited_once_with("jira__get_issue", {"key": "X-1"})
+
+    @pytest.mark.parametrize("bad_params", ["a string", ["a"], 42])
+    async def test_non_object_params_is_invalid_params(self, bad_params):
+        endpoint, session_id, _ = _make_endpoint()
+        response = await endpoint.handle_jsonrpc(session_id, {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": bad_params,
+        })
+        assert response["error"]["code"] == -32602
+        assert "must be an object" in response["error"]["message"]
+
+    async def test_null_params_is_treated_as_empty_object(self):
+        endpoint, session_id, _ = _make_endpoint()
+        response = await endpoint.handle_jsonrpc(session_id, {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": None,
+        })
+        assert "result" in response
+
+    @pytest.mark.parametrize("bad_tool", [123, ["a"], {"a": 1}, True, None, "", "   "])
+    async def test_non_string_tool_is_rejected_as_tool_error(self, bad_tool):
+        endpoint, session_id, router = _make_endpoint()
+        result = await _call(endpoint, session_id, {"tool": bad_tool})
+        assert result["isError"] is True
+        assert "non-empty string" in result["content"][0]["text"]
+        router.route_tool_call.assert_not_awaited()
+
+    async def test_tool_name_is_stripped(self):
+        endpoint, session_id, router = _make_endpoint()
+        await _call(endpoint, session_id, {"tool": " jira__get_issue ", "arguments": {"key": "X-1"}})
+        router.route_tool_call.assert_awaited_once_with("jira__get_issue", {"key": "X-1"})
+
+    @pytest.mark.parametrize("bad_query", [123, ["a"], {"a": 1}])
+    async def test_non_string_search_query_is_rejected(self, bad_query):
+        endpoint, session_id, _ = _make_endpoint()
+        result = await endpoint.handle_tools_call(
+            session_id, {"name": "search_tools", "arguments": {"query": bad_query}},
+        )
+        assert result["isError"] is True
+        assert "'query' must be a string" in result["content"][0]["text"]
+
+    @pytest.mark.parametrize("query", [None, ""])
+    async def test_empty_search_query_matches_everything(self, query):
+        endpoint, session_id, _ = _make_endpoint()
+        result = await endpoint.handle_tools_call(
+            session_id, {"name": "search_tools", "arguments": {"query": query}},
+        )
+        assert "isError" not in result
+        assert '"found": 1' in result["content"][0]["text"]
+
+    async def test_search_tolerates_missing_description_and_schema(self):
+        endpoint, session_id, _ = _make_endpoint()
+        endpoint._registry.sync({
+            "jira": {
+                "tools": [{"name": "get_issue", "description": None, "inputSchema": None}],
+                "resources": [], "resource_templates": [], "prompts": [],
+            },
+        })
+        result = await endpoint.handle_tools_call(
+            session_id, {"name": "search_tools", "arguments": {"query": "issue"}},
+        )
+        assert "isError" not in result
+
+    async def test_json_encoded_null_arguments_becomes_empty(self):
+        endpoint, session_id, router = _make_endpoint()
+        result = await _call(endpoint, session_id, {"tool": "jira__get_issue", "arguments": "null"})
+        assert "isError" not in result
+        router.route_tool_call.assert_awaited_once_with("jira__get_issue", {})
+
+
+class TestMetaRecursionGuard:
+    async def test_deeply_nested_call_tool_is_rejected(self):
+        endpoint, session_id, router = _make_endpoint()
+        payload = {"tool": "jira__get_issue", "arguments": {"key": "X-1"}}
+        for _ in range(50):
+            payload = {"tool": "call_tool", "arguments": payload}
+        result = await _call(endpoint, session_id, payload)
+        assert result["isError"] is True
+        assert "nesting exceeded" in result["content"][0]["text"]
+        router.route_tool_call.assert_not_awaited()
+
+    async def test_shallow_nesting_still_works(self):
+        endpoint, session_id, router = _make_endpoint()
+        result = await _call(endpoint, session_id, {
+            "tool": "call_tool",
+            "arguments": {"tool": "jira__get_issue", "arguments": {"key": "X-1"}},
+        })
+        assert "isError" not in result
+        router.route_tool_call.assert_awaited_once_with("jira__get_issue", {"key": "X-1"})
