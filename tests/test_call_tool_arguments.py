@@ -8,6 +8,8 @@ forwarded a raw ``str`` unparsed when a client JSON-encoded them.
 
 from __future__ import annotations
 
+import logging
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -18,6 +20,7 @@ from slm_mcp_hub.server.mcp_endpoint import (
     MCPEndpoint,
     _coerce_object,
     _normalise_tool_arguments,
+    _reconstruct_dotted_arguments,
 )
 from slm_mcp_hub.session.manager import SessionManager
 
@@ -451,3 +454,346 @@ class TestAdversarialReviewFindings:
         result = await _call(endpoint, session_id, {"tool": "search_tools", "query": "jira"})
         assert "isError" not in result
         assert '"found": 1' in result["content"][0]["text"]
+
+
+class TestDotNotationReconstruction:
+    """AIDEV-281: some models flatten nested tool params to dotted top-level
+    keys (confirmed on Gemini 3.6 Flash), so ``arguments.issue_key`` arrives
+    as a sibling of ``tool`` and the real arguments never reach the backend."""
+
+    def test_single_flattened_key_is_nested(self):
+        payload, repaired, skipped = _reconstruct_dotted_arguments({
+            "tool": "jira__get_issue", "arguments.issue_key": "A-1",
+        })
+        assert payload["arguments"] == {"issue_key": "A-1"}
+        assert repaired == ["arguments.issue_key"]
+        assert skipped == []
+
+    def test_multiple_flattened_keys_merge_into_one_object(self):
+        payload, repaired, _ = _reconstruct_dotted_arguments({
+            "tool": "jira__search", "arguments.jql": "project = A", "arguments.limit": 10,
+        })
+        assert payload["arguments"] == {"jql": "project = A", "limit": 10}
+        assert repaired == ["arguments.jql", "arguments.limit"]
+
+    def test_multi_level_path_is_reconstructed_to_full_depth(self):
+        payload, repaired, _ = _reconstruct_dotted_arguments({
+            "tool": "t", "arguments.filter.status": "open", "arguments.filter.owner": "me",
+        })
+        assert payload["arguments"] == {"filter": {"status": "open", "owner": "me"}}
+        assert repaired == ["arguments.filter.owner", "arguments.filter.status"]
+
+    def test_numeric_segments_are_dict_keys_not_list_indices(self):
+        payload, _, _ = _reconstruct_dotted_arguments({
+            "tool": "t", "arguments.items.0": "first", "arguments.items.1": "second",
+        })
+        assert payload["arguments"] == {"items": {"0": "first", "1": "second"}}
+
+    def test_no_dotted_keys_is_a_strict_no_op(self):
+        original = {"tool": "jira__get_issue", "arguments": {"issue_key": "A-1"}}
+        payload, repaired, skipped = _reconstruct_dotted_arguments(original)
+        assert payload is original
+        assert (repaired, skipped) == ([], [])
+
+    def test_empty_payload_is_a_strict_no_op(self):
+        original: dict = {}
+        payload, repaired, skipped = _reconstruct_dotted_arguments(original)
+        assert payload is original
+        assert (repaired, skipped) == ([], [])
+
+    def test_explicit_nested_value_wins_over_conflicting_flattened_key(self):
+        payload, repaired, skipped = _reconstruct_dotted_arguments({
+            "tool": "t", "arguments": {"issue_key": "EXPLICIT"}, "arguments.issue_key": "FLAT",
+        })
+        assert payload["arguments"] == {"issue_key": "EXPLICIT"}
+        assert repaired == []
+        assert skipped == ["arguments.issue_key"]
+
+    def test_flattened_keys_extend_a_partial_explicit_object(self):
+        payload, repaired, _ = _reconstruct_dotted_arguments({
+            "tool": "t", "arguments": {"jql": "x"}, "arguments.limit": 5,
+        })
+        assert payload["arguments"] == {"jql": "x", "limit": 5}
+        assert repaired == ["arguments.limit"]
+
+    def test_repair_applies_when_arguments_is_present_but_empty(self):
+        payload, repaired, _ = _reconstruct_dotted_arguments({
+            "tool": "t", "arguments": {}, "arguments.issue_key": "A-1",
+        })
+        assert payload["arguments"] == {"issue_key": "A-1"}
+        assert repaired == ["arguments.issue_key"]
+
+    def test_repair_applies_when_arguments_is_null(self):
+        payload, repaired, _ = _reconstruct_dotted_arguments({
+            "tool": "t", "arguments": None, "arguments.issue_key": "A-1",
+        })
+        assert payload["arguments"] == {"issue_key": "A-1"}
+        assert repaired == ["arguments.issue_key"]
+
+    def test_explicit_non_object_arguments_is_left_for_the_normaliser(self):
+        payload, repaired, skipped = _reconstruct_dotted_arguments({
+            "tool": "t", "arguments": '{"issue_key": "A-1"}', "arguments.limit": 5,
+        })
+        assert payload["arguments"] == '{"issue_key": "A-1"}'
+        assert repaired == []
+        assert skipped == ["arguments.limit"]
+
+    def test_path_through_an_existing_non_dict_is_discarded_not_raised(self):
+        payload, repaired, skipped = _reconstruct_dotted_arguments({
+            "tool": "t", "arguments": {"filter": "not-an-object"},
+            "arguments.filter.status": "open",
+        })
+        assert payload["arguments"] == {"filter": "not-an-object"}
+        assert repaired == []
+        assert skipped == ["arguments.filter.status"]
+
+    def test_path_through_a_flattened_scalar_is_discarded_not_raised(self):
+        payload, repaired, skipped = _reconstruct_dotted_arguments({
+            "tool": "t", "arguments.filter": "scalar", "arguments.filter.status": "open",
+        })
+        assert payload["arguments"] == {"filter": "scalar"}
+        assert repaired == ["arguments.filter"]
+        assert skipped == ["arguments.filter.status"]
+
+    @pytest.mark.parametrize("bad_key", ["arguments.", "arguments..status", "arguments.a."])
+    def test_empty_path_segments_are_ignored_without_error(self, bad_key):
+        payload, repaired, skipped = _reconstruct_dotted_arguments({"tool": "t", bad_key: "x"})
+        assert repaired == []
+        assert skipped == [bad_key]
+        assert bad_key not in payload
+
+    def test_a_fully_skipped_repair_does_not_invent_an_arguments_key(self):
+        """Otherwise a stray dotted key would suppress 277's sibling hoist."""
+        payload, repaired, skipped = _reconstruct_dotted_arguments({
+            "tool": "t", "arguments.": "x", "issue_key": "A-1",
+        })
+        assert "arguments" not in payload
+        assert _normalise_tool_arguments(payload) == ({"issue_key": "A-1"}, None)
+        assert (repaired, skipped) == ([], ["arguments."])
+
+    def test_all_prefixed_keys_are_stripped_from_the_envelope(self):
+        payload, _, _ = _reconstruct_dotted_arguments({
+            "tool": "t", "arguments.a": 1, "arguments.b.c": 2, "arguments.": 3,
+        })
+        assert not [k for k in payload if k.startswith("arguments.")]
+
+    def test_tool_and_unrelated_keys_are_preserved_verbatim(self):
+        payload, _, _ = _reconstruct_dotted_arguments({
+            "tool": " jira__get_issue ", "arguments": {"issue_key": "A-1"},
+            "reasoning": "chatter", "arguments.ignored": "x",
+        })
+        assert payload["tool"] == " jira__get_issue "
+        assert payload["reasoning"] == "chatter"
+
+    def test_bare_siblings_survive_a_partial_repair(self):
+        """277 hoists bare siblings only while 'arguments' is absent, so a
+        synthesised 'arguments' key would silently drop them."""
+        payload, repaired, _ = _reconstruct_dotted_arguments({
+            "tool": "jira__get_issue", "issue_key": "A-1", "arguments.fields": "summary",
+        })
+        assert payload["arguments"] == {"issue_key": "A-1", "fields": "summary"}
+        assert repaired == ["arguments.fields"]
+        assert _normalise_tool_arguments(payload) == (
+            {"issue_key": "A-1", "fields": "summary"}, None,
+        )
+
+    def test_a_dotted_key_wins_over_a_conflicting_bare_sibling(self):
+        payload, _, _ = _reconstruct_dotted_arguments({
+            "tool": "t", "issue_key": "SIBLING", "arguments.issue_key": "DOTTED",
+        })
+        assert payload["arguments"] == {"issue_key": "DOTTED"}
+
+    def test_bare_siblings_are_not_absorbed_when_arguments_is_explicit(self):
+        payload, _, _ = _reconstruct_dotted_arguments({
+            "tool": "t", "arguments": {}, "reasoning": "chatter", "arguments.a": 1,
+        })
+        assert payload["arguments"] == {"a": 1}
+        assert payload["reasoning"] == "chatter"
+
+    def test_the_original_payload_is_not_mutated(self):
+        original = {"tool": "t", "arguments": {"jql": "x"}, "arguments.limit": 5}
+        _reconstruct_dotted_arguments(original)
+        assert original == {"tool": "t", "arguments": {"jql": "x"}, "arguments.limit": 5}
+
+    def test_nested_explicit_objects_are_not_mutated(self):
+        nested = {"status": "open"}
+        original = {"tool": "t", "arguments": {"filter": nested}, "arguments.filter.owner": "me"}
+        payload, _, _ = _reconstruct_dotted_arguments(original)
+        assert payload["arguments"]["filter"] == {"status": "open", "owner": "me"}
+        assert nested == {"status": "open"}
+
+
+class TestDotNotationEndToEnd:
+    """The repair runs on the raw envelope before AIDEV-277's normalisation,
+    so a dot-notation-only payload never reaches a backend prefixed."""
+
+    async def test_gemini_shaped_payload_reaches_the_backend_nested(self):
+        endpoint, sid, router = _make_endpoint()
+        result = await _call(endpoint, sid, {
+            "tool": "jira__get_issue", "arguments.issue_key": "A-1",
+        })
+        assert not result.get("isError")
+        router.route_tool_call.assert_awaited_once_with("jira__get_issue", {"issue_key": "A-1"})
+
+    async def test_legacy_hub_alias_is_repaired_identically(self):
+        endpoint, sid, router = _make_endpoint()
+        await endpoint.handle_tools_call(sid, {
+            "name": "hub__call_tool",
+            "arguments": {"tool": "jira__get_issue", "arguments.issue_key": "A-1"},
+        })
+        router.route_tool_call.assert_awaited_once_with("jira__get_issue", {"issue_key": "A-1"})
+
+    async def test_meta_tool_dispatch_through_call_tool_is_repaired(self):
+        endpoint, sid, _ = _make_endpoint()
+        result = await _call(endpoint, sid, {
+            "tool": "search_tools", "arguments.query": "jira issue",
+        })
+        assert "isError" not in result
+        assert '"found": 1' in result["content"][0]["text"]
+
+    async def test_search_tools_query_containing_a_dot_is_unaffected(self):
+        endpoint, sid, _ = _make_endpoint()
+        result = await endpoint.handle_tools_call(sid, {
+            "name": "search_tools", "arguments": {"query": "jira.get_issue"},
+        })
+        assert "isError" not in result
+        assert '"found": 0' in result["content"][0]["text"]
+
+    async def test_list_servers_is_unaffected(self):
+        endpoint, sid, _ = _make_endpoint()
+        result = await endpoint.handle_tools_call(sid, {"name": "list_servers"})
+        assert "isError" not in result
+
+    async def test_explicit_arguments_still_win_end_to_end(self):
+        endpoint, sid, router = _make_endpoint()
+        await _call(endpoint, sid, {
+            "tool": "jira__get_issue",
+            "arguments": {"issue_key": "EXPLICIT"},
+            "arguments.issue_key": "FLAT",
+        })
+        router.route_tool_call.assert_awaited_once_with(
+            "jira__get_issue", {"issue_key": "EXPLICIT"},
+        )
+
+    async def test_argumentless_call_forwards_an_empty_map(self):
+        endpoint, sid, router = _make_endpoint()
+        await _call(endpoint, sid, {"tool": "jira__get_issue"})
+        router.route_tool_call.assert_awaited_once_with("jira__get_issue", {})
+
+
+class TestDotNotationTelemetry:
+    """Misbehaving clients must be visible to operators — without leaking
+    argument values into the log."""
+
+    async def test_repair_logs_a_warning_with_client_and_paths(self, caplog):
+        endpoint, sid, _ = _make_endpoint()
+        with caplog.at_level(logging.WARNING, logger="slm_mcp_hub.server.mcp_endpoint"):
+            await _call(endpoint, sid, {
+                "tool": "jira__get_issue", "arguments.issue_key": "SECRET-VALUE",
+            })
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        message = warnings[0].getMessage()
+        assert "test" in message
+        assert "jira__get_issue" in message
+        assert "arguments.issue_key" in message
+
+    async def test_argument_values_never_appear_in_the_log(self, caplog):
+        endpoint, sid, _ = _make_endpoint()
+        with caplog.at_level(logging.DEBUG, logger="slm_mcp_hub.server.mcp_endpoint"):
+            await _call(endpoint, sid, {
+                "tool": "jira__get_issue", "arguments.issue_key": "SECRET-VALUE",
+            })
+        assert "SECRET-VALUE" not in caplog.text
+
+    async def test_a_well_formed_call_logs_no_warning(self, caplog):
+        endpoint, sid, _ = _make_endpoint()
+        with caplog.at_level(logging.WARNING, logger="slm_mcp_hub.server.mcp_endpoint"):
+            await _call(endpoint, sid, {
+                "tool": "jira__get_issue", "arguments": {"issue_key": "A-1"},
+            })
+        assert [r for r in caplog.records if r.levelno == logging.WARNING] == []
+
+    async def test_skipped_paths_are_reported(self, caplog):
+        endpoint, sid, _ = _make_endpoint()
+        with caplog.at_level(logging.WARNING, logger="slm_mcp_hub.server.mcp_endpoint"):
+            await _call(endpoint, sid, {
+                "tool": "jira__get_issue",
+                "arguments": {"issue_key": "A-1"},
+                "arguments.issue_key": "FLAT",
+            })
+        message = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+        assert "arguments.issue_key" in message
+        assert "skipped" in message.lower()
+
+    async def test_an_unresolvable_client_is_reported_as_unknown(self, caplog):
+        endpoint, _, _ = _make_endpoint()
+        with caplog.at_level(logging.WARNING, logger="slm_mcp_hub.server.mcp_endpoint"):
+            await endpoint.handle_tools_call("no-such-session", {
+                "name": "call_tool",
+                "arguments": {"tool": "jira__get_issue", "arguments.issue_key": "A-1"},
+            })
+        message = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+        assert "unknown" in message
+
+    async def test_meta_tool_handlers_default_the_session_id(self):
+        """Existing call sites pass no session id; they must keep working."""
+        endpoint, _, router = _make_endpoint()
+        result = await endpoint._handle_meta_tool(
+            "call_tool", {"tool": "jira__get_issue", "arguments.issue_key": "A-1"},
+        )
+        assert not result.get("isError")
+        router.route_tool_call.assert_awaited_once_with("jira__get_issue", {"issue_key": "A-1"})
+
+
+class TestDotNotationReviewFindings:
+    """Regressions for defects found by adversarial review of the repair."""
+
+    async def test_mixed_bare_and_dotted_arguments_all_reach_the_backend(self):
+        """A single hallucinated dotted key used to discard 277's bare siblings,
+        producing a silent wrong call rather than an error."""
+        endpoint, sid, router = _make_endpoint()
+        await _call(endpoint, sid, {
+            "tool": "jira__get_issue", "issue_key": "A-1", "arguments.fields": "summary",
+        })
+        router.route_tool_call.assert_awaited_once_with(
+            "jira__get_issue", {"issue_key": "A-1", "fields": "summary"},
+        )
+
+    @pytest.mark.parametrize("bad_name", [None, 1234, ["a"]])
+    async def test_a_non_string_client_name_does_not_fail_the_call(self, bad_name):
+        """clientInfo.name is unvalidated, so a session can carry a non-string
+        name. The repair path must not turn that into a -32603."""
+        endpoint, _, router = _make_endpoint()
+        sid = endpoint._session_manager.create_session(client_name=bad_name)
+        result = await _call(endpoint, sid, {
+            "tool": "jira__get_issue", "arguments.issue_key": "A-1",
+        })
+        assert not result.get("isError")
+        router.route_tool_call.assert_awaited_once_with("jira__get_issue", {"issue_key": "A-1"})
+
+    async def test_a_non_string_client_name_is_logged_as_unknown(self, caplog):
+        endpoint, _, _ = _make_endpoint()
+        unvalidated: Any = None
+        sid = endpoint._session_manager.create_session(client_name=unvalidated)
+        with caplog.at_level(logging.WARNING, logger="slm_mcp_hub.server.mcp_endpoint"):
+            await _call(endpoint, sid, {"tool": "jira__get_issue", "arguments.issue_key": "A-1"})
+        message = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+        assert "unknown" in message
+
+    async def test_a_blank_client_name_is_logged_as_unknown(self, caplog):
+        endpoint, _, _ = _make_endpoint()
+        sid = endpoint._session_manager.create_session(client_name="   ")
+        with caplog.at_level(logging.WARNING, logger="slm_mcp_hub.server.mcp_endpoint"):
+            await _call(endpoint, sid, {"tool": "jira__get_issue", "arguments.issue_key": "A-1"})
+        message = "\n".join(r.getMessage() for r in caplog.records if r.levelno == logging.WARNING)
+        assert "unknown" in message
+
+    async def test_self_invocation_guard_still_fires_on_a_dotted_payload(self):
+        endpoint, sid, router = _make_endpoint()
+        result = await _call(endpoint, sid, {
+            "tool": "hub__call_tool", "arguments.tool": "jira__get_issue",
+        })
+        assert result["isError"] is True
+        assert "cannot invoke itself" in result["content"][0]["text"]
+        router.route_tool_call.assert_not_awaited()

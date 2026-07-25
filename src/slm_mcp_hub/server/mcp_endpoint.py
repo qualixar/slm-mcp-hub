@@ -25,6 +25,11 @@ logger = logging.getLogger(__name__)
 # arguments of the tool being invoked.
 _RESERVED_META_KEYS = frozenset({"tool", "arguments"})
 
+# Some models flatten nested tool-call parameters into dotted top-level keys,
+# so `{"arguments": {"issue_key": "A-1"}}` arrives as `{"arguments.issue_key":
+# "A-1"}` (confirmed on Gemini 3.6 Flash).
+_FLAT_ARG_PREFIX = "arguments."
+
 class InvalidParams(ValueError):
     """Structurally invalid client params — reported as JSON-RPC -32602.
 
@@ -95,6 +100,89 @@ def _normalise_tool_arguments(payload: dict[str, Any]) -> tuple[dict[str, Any] |
             payload.get("tool"), sorted(flattened),
         )
     return flattened, None
+
+
+def _copy_nested_dicts(value: dict[str, Any]) -> dict[str, Any]:
+    """Copy a mapping deeply enough that reconstruction cannot mutate the caller."""
+    return {
+        k: _copy_nested_dicts(v) if isinstance(v, dict) else v
+        for k, v in value.items()
+    }
+
+
+def _descend(root: dict[str, Any], segments: list[str]) -> dict[str, Any] | None:
+    """Walk (creating as needed) to the container holding the final segment.
+
+    Returns None when the path runs through a value that is not an object;
+    that branch is unreconstructable and is discarded rather than raising.
+    Intermediate containers are only created for absent keys, so a discarded
+    branch leaves no debris behind.
+    """
+    cursor = root
+    for segment in segments:
+        if segment not in cursor:
+            cursor[segment] = {}
+        branch = cursor[segment]
+        if not isinstance(branch, dict):
+            return None
+        cursor = branch
+    return cursor
+
+
+def _reconstruct_dotted_arguments(
+    payload: dict[str, Any],
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    """Rebuild ``arguments.``-prefixed top-level keys into a nested object.
+
+    Returns (payload, repaired_paths, skipped_paths). This runs on the raw
+    envelope *before* :func:`_normalise_tool_arguments`: a dot-notation-only
+    payload has no 'arguments' key, so that function's sibling hoist would
+    otherwise forward a literal key named 'arguments.issue_key' to a backend.
+
+    A payload with no dotted keys is returned unchanged, by identity. An
+    explicitly supplied value always wins over a flattened key that would
+    overwrite it; losing keys are reported as skipped, never applied.
+    """
+    dotted = sorted(k for k in payload if k.startswith(_FLAT_ARG_PREFIX))
+    if not dotted:
+        return payload, [], []
+
+    stripped = {k: v for k, v in payload.items() if not k.startswith(_FLAT_ARG_PREFIX)}
+
+    existing = payload.get("arguments")
+    if existing is not None and not isinstance(existing, dict):
+        # A JSON-encoded or otherwise non-object 'arguments' wins outright;
+        # _normalise_tool_arguments parses it or reports it. Merging into an
+        # opaque value would be guesswork.
+        return stripped, [], dotted
+
+    rebuilt = _copy_nested_dicts(existing) if isinstance(existing, dict) else {}
+    repaired: list[str] = []
+    skipped: list[str] = []
+
+    for key in dotted:
+        segments = key[len(_FLAT_ARG_PREFIX):].split(".")
+        if not all(segments):
+            skipped.append(key)
+            continue
+        container = _descend(rebuilt, segments[:-1])
+        leaf = segments[-1]
+        if container is None or leaf in container:
+            skipped.append(key)
+            continue
+        container[leaf] = payload[key]
+        repaired.append(key)
+
+    if repaired or "arguments" in payload:
+        if "arguments" not in payload:
+            # _normalise_tool_arguments hoists bare top-level siblings only
+            # while 'arguments' is absent. Synthesising it here would suppress
+            # that hoist and silently drop them, so fold them in. Dotted keys
+            # win: they name their target namespace explicitly.
+            for key in [k for k in stripped if k not in _RESERVED_META_KEYS]:
+                rebuilt.setdefault(key, stripped.pop(key))
+        stripped["arguments"] = rebuilt
+    return stripped, repaired, skipped
 
 
 class MCPEndpoint:
@@ -222,19 +310,33 @@ class MCPEndpoint:
         "hub__list_servers": "list_servers",
     }
 
-    async def _handle_meta_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _handle_meta_tool(
+        self, name: str, arguments: dict[str, Any], session_id: str = "",
+    ) -> dict[str, Any]:
         """Handle Meta-MCP hub meta-tools."""
         name = self._META_TOOL_ALIASES.get(name, name)
         if name == "search_tools":
             return await self._meta_search_tools(arguments)
 
         if name == "call_tool":
-            return await self._meta_call_tool(arguments)
+            return await self._meta_call_tool(arguments, session_id)
 
         if name == "list_servers":
             return await self._meta_list_servers()
 
         return {"content": [{"type": "text", "text": f"Unknown meta-tool: {name}"}], "isError": True}
+
+    def _client_name(self, session_id: str) -> str:
+        """Best-effort client name for operator-facing logs.
+
+        Nothing validates clientInfo.name, so a session can carry a non-string
+        name. This runs on the repair path, which must never fail a call.
+        """
+        session = self._session_manager.get_session(session_id) if session_id else None
+        name = session.client_name if session else None
+        if not isinstance(name, str):
+            return "unknown"
+        return name.strip() or "unknown"
 
     async def _meta_search_tools(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Search tools — returns names, descriptions, server, AND full inputSchema.
@@ -279,8 +381,18 @@ class MCPEndpoint:
         }
         return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
 
-    async def _meta_call_tool(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _meta_call_tool(
+        self, arguments: dict[str, Any], session_id: str = "",
+    ) -> dict[str, Any]:
         """Call any tool through the hub — the universal tool router."""
+        arguments, repaired, skipped = _reconstruct_dotted_arguments(arguments)
+        if repaired or skipped:
+            logger.warning(
+                "Client %r flattened call_tool arguments for %r into dot-notation keys; "
+                "repaired %s, skipped %s",
+                self._client_name(session_id), arguments.get("tool"), repaired, skipped,
+            )
+
         tool_name = arguments.get("tool")
 
         if not isinstance(tool_name, str) or not tool_name.strip():
@@ -383,7 +495,7 @@ class MCPEndpoint:
 
         # Handle Meta-MCP tools locally (including unknown hub__ names)
         if name.startswith("hub__") or name in ("search_tools", "call_tool", "list_servers"):
-            return await self._handle_meta_tool(name, arguments)
+            return await self._handle_meta_tool(name, arguments, session_id)
 
         start = time.time()
         result = await self._router.route_tool_call(name, arguments)
