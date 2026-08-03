@@ -119,6 +119,14 @@ class StdioServer:
                 await self._send_error(writer, None, -32700, f"Parse error: {exc}")
                 continue
 
+            # JSON-RPC requests are objects.  JSON itself permits arrays,
+            # strings, numbers, and null, but forwarding one of those values
+            # to the endpoint would turn a client validation error into a
+            # server-side AttributeError when it accesses request fields.
+            if not isinstance(body, dict):
+                await self._send_error(writer, None, -32600, "Invalid Request")
+                continue
+
             await self._handle_one(writer, body)
 
     async def _handle_one(self, writer: Any, body: dict[str, Any]) -> None:
