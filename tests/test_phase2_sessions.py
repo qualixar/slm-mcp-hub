@@ -5,18 +5,16 @@ from __future__ import annotations
 import time
 from unittest.mock import AsyncMock
 
-from slm_mcp_hub.core.constants import VERSION
-
 import pytest
 from fastapi.testclient import TestClient
 
+from slm_mcp_hub.core.constants import VERSION
 from slm_mcp_hub.core.registry import CapabilityRegistry
 from slm_mcp_hub.federation.router import FederationRouter, RouteResult
 from slm_mcp_hub.server.http_server import create_app
 from slm_mcp_hub.server.mcp_endpoint import MCPEndpoint
 from slm_mcp_hub.session.coordination import SessionCoordinator
 from slm_mcp_hub.session.manager import SessionInfo, SessionManager
-
 
 # ===========================================================================
 # Session Manager Tests
@@ -105,7 +103,7 @@ class TestSessionManager:
         sm.create_session()
         time.sleep(0.01)
         # Expired session cleaned up, new one can be created
-        sid2 = sm.create_session()
+        sm.create_session()
         assert sm.active_count == 1
 
     def test_create_with_project_and_permissions(self):
@@ -250,7 +248,7 @@ class TestMCPEndpoint:
     async def test_handle_initialize(self):
         ep, sid, _ = self._make_endpoint()
         result = await ep.handle_initialize(sid, {"clientInfo": {"name": "Claude Code"}})
-        assert result["protocolVersion"] == "2024-11-05"
+        assert result["protocolVersion"] == "2025-11-25"
         assert "tools" in result["capabilities"]
 
     @pytest.mark.asyncio

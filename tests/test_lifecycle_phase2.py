@@ -24,7 +24,6 @@ from slm_mcp_hub.federation.connection import ConnectionState, MCPConnection
 from slm_mcp_hub.federation.manager import ConnectionManager
 from slm_mcp_hub.federation.router import FederationRouter
 
-
 # ---------- Fixtures ----------
 
 @pytest.fixture()
@@ -374,7 +373,7 @@ class TestDrainSemantics:
 class TestExitDiagnostic:
     """Verify the rich error message produced when a child process dies."""
 
-    def test_diagnostic_includes_command_and_exit_code(self):
+    def test_diagnostic_includes_exit_code_but_omits_command(self):
         from slm_mcp_hub.federation.connection import MCPConnection
         cfg = MCPServerConfig(name="echo-srv", transport="stdio", command="echo", args=("hello",))
         conn = MCPConnection(cfg)
@@ -385,10 +384,10 @@ class TestExitDiagnostic:
         msg = conn._exit_diagnostic()
         assert "echo-srv" in msg
         assert "exit code 0" in msg
-        assert "echo hello" in msg
+        assert "echo hello" not in msg
         assert "verify the command is an MCP server" in msg
 
-    def test_diagnostic_includes_stderr_tail(self):
+    def test_diagnostic_omits_stderr_tail(self):
         from slm_mcp_hub.federation.connection import MCPConnection
         cfg = MCPServerConfig(name="bad", transport="stdio", command="false")
         conn = MCPConnection(cfg)
@@ -398,8 +397,8 @@ class TestExitDiagnostic:
         conn._process = proc
 
         msg = conn._exit_diagnostic()
-        assert "stderr tail" in msg
-        assert "bad config line 2" in msg
+        assert "stderr output was captured and omitted" in msg
+        assert "bad config line 2" not in msg
 
     def test_diagnostic_no_process_handle(self):
         """If process never spawned, diagnostic still works (no exit code)."""
@@ -409,7 +408,7 @@ class TestExitDiagnostic:
         # No _process set
         msg = conn._exit_diagnostic()
         assert "ghost" in msg
-        assert "nonexistent" in msg
+        assert "nonexistent" not in msg
 
 
 # ---------- MCPConnection rejects requests while draining ----------

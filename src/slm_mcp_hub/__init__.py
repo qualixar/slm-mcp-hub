@@ -1,3 +1,5 @@
-"""SLM MCP Hub — The World's First MCP Gateway That Learns."""
+"""SLM MCP Hub package."""
 
-__version__ = "0.1.2"
+from slm_mcp_hub.core.constants import VERSION
+
+__version__ = VERSION

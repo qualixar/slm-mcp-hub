@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib.metadata
 import logging
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from slm_mcp_hub.core.config import HubConfig, load_config
 from slm_mcp_hub.core.constants import VERSION
@@ -147,7 +146,7 @@ class HubOrchestrator:
             if hasattr(eps, "select"):
                 hub_plugins = list(eps.select(group="slm_mcp_hub.plugins"))
             else:
-                hub_plugins = eps.get("slm_mcp_hub.plugins", [])
+                hub_plugins = cast(Any, eps).get("slm_mcp_hub.plugins", [])
         except Exception:
             hub_plugins = []
 

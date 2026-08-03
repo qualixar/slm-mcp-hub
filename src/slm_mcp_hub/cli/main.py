@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import os
 import sys
@@ -11,6 +12,8 @@ from pathlib import Path
 
 import click
 
+from slm_mcp_hub.cli.server_commands import server as server_group
+from slm_mcp_hub.cli.setup_commands import network, setup
 from slm_mcp_hub.core.config import (
     generate_default_config,
     import_claude_config,
@@ -18,11 +21,13 @@ from slm_mcp_hub.core.config import (
     load_config,
     save_config,
 )
-from slm_mcp_hub.core.constants import CONFIG_FILE, PID_FILE, VERSION
+from slm_mcp_hub.core.constants import (
+    VERSION,
+    get_config_file,
+    get_pid_file,
+    get_snapshots_dir,
+)
 from slm_mcp_hub.core.hub import HubOrchestrator
-from slm_mcp_hub.cli.setup_commands import network, setup
-from slm_mcp_hub.cli.server_commands import server as server_group
-
 
 SECRETS_PATHS = (
     Path.home() / ".claude-secrets.env",
@@ -70,7 +75,7 @@ def _setup_logging(level: str, *, stderr_only: bool = False) -> None:
 @click.group()
 @click.version_option(VERSION, prog_name="slm-mcp-hub")
 def cli() -> None:
-    """SLM MCP Hub — The World's First MCP Gateway That Learns."""
+    """SLM MCP Hub — Local-first MCP gateway for federated connections."""
 
 
 def _kill_existing_hub(config_host: str, config_port: int) -> None:
@@ -78,23 +83,29 @@ def _kill_existing_hub(config_host: str, config_port: int) -> None:
     import signal
     import socket
     import time
-    from slm_mcp_hub.resilience.watchdog import is_running, read_pid_file, remove_pid_file
+
+    from slm_mcp_hub.resilience.watchdog import (
+        is_running,
+        read_pid_file,
+        remove_pid_file,
+    )
 
     if is_running():
         old_pid = read_pid_file()
-        click.echo(f"  Killing existing hub (PID {old_pid})...")
-        try:
-            os.kill(old_pid, signal.SIGTERM)
-            for _ in range(20):
-                time.sleep(0.25)
-                try:
-                    os.kill(old_pid, 0)
-                except ProcessLookupError:
-                    break
-            else:
-                os.kill(old_pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        if old_pid is not None:
+            click.echo(f"  Killing existing hub (PID {old_pid})...")
+            try:
+                os.kill(old_pid, signal.SIGTERM)
+                for _ in range(20):
+                    time.sleep(0.25)
+                    try:
+                        os.kill(old_pid, 0)
+                    except ProcessLookupError:
+                        break
+                else:
+                    os.kill(old_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     remove_pid_file()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -133,6 +144,16 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
     if port:
         config = replace(config, port=port)
 
+    try:
+        loopback = ipaddress.ip_address(config.host).is_loopback
+    except ValueError:
+        loopback = config.host.lower() == "localhost"
+    hub_api_key = os.environ.get("SLM_HUB_API_KEY")
+    if not loopback and not hub_api_key:
+        raise click.ClickException(
+            "Remote binding requires SLM_HUB_API_KEY; refusing unauthenticated exposure"
+        )
+
     _kill_existing_hub(config.host, config.port)
 
     async def _run() -> None:
@@ -153,10 +174,12 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
                 registry=runtime.registry,
                 reloader=runtime.reloader,
                 conn_manager=runtime.conn_manager,
+                api_key=hub_api_key,
             )
 
-            PID_FILE.parent.mkdir(parents=True, exist_ok=True)
-            PID_FILE.write_text(str(os.getpid()))
+            pid_file = get_pid_file()
+            pid_file.parent.mkdir(parents=True, exist_ok=True)
+            pid_file.write_text(str(os.getpid()))
 
             uvi_config = uvicorn.Config(
                 app,
@@ -192,8 +215,8 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
                 pass
             finally:
                 await runtime.disconnect_all()
-                if PID_FILE.exists():
-                    PID_FILE.unlink()
+                if pid_file.exists():
+                    pid_file.unlink()
 
     try:
         asyncio.run(_run())
@@ -282,7 +305,7 @@ def status(verbose: bool) -> None:
             click.echo(f"  State: {health.get('state', 'unknown')}")
             click.echo(f"  Uptime: {health.get('uptime_seconds', 0):.0f}s")
             click.echo(f"  MCP servers: {health.get('mcp_servers_configured', '?')}")
-            click.echo(f"  Config: {CONFIG_FILE}")
+            click.echo(f"  Config: {get_config_file()}")
 
             if verbose:
                 try:
@@ -314,11 +337,11 @@ def status(verbose: bool) -> None:
         except httpx.ConnectError:
             click.echo(f"Hub PID {pid} exists but HTTP endpoint is unreachable")
             click.echo(f"  Port {config.port} not responding — hub may have crashed")
-            click.echo(f"  Restart with: slm-hub start")
+            click.echo("  Restart with: slm-hub start")
     else:
         click.echo("Hub is not running")
-        click.echo(f"  Start with: slm-hub start")
-        click.echo(f"  Install daemon: slm-hub daemon install")
+        click.echo("  Start with: slm-hub start")
+        click.echo("  Install daemon: slm-hub daemon install")
 
 
 @cli.command()
@@ -415,26 +438,28 @@ def config_import(file_path: Path, fmt: str) -> None:
 def config_init() -> None:
     """Generate default configuration file."""
     _setup_logging("WARNING")
-    if CONFIG_FILE.exists():
-        click.echo(f"Config already exists at {CONFIG_FILE}")
+    config_file = get_config_file()
+    if config_file.exists():
+        click.echo(f"Config already exists at {config_file}")
         if not click.confirm("Overwrite?"):
             return
-    generate_default_config()
-    click.echo(f"Default config created at {CONFIG_FILE}")
+    generate_default_config(config_file)
+    click.echo(f"Default config created at {config_file}")
 
 
 @config.command("snapshots")
 def config_snapshots() -> None:
     """List all config snapshots (auto-saved before every change)."""
-    from slm_mcp_hub.core.config import list_snapshots, SNAPSHOTS_DIR
+    from slm_mcp_hub.core.config import list_snapshots
+    snapshots_dir = get_snapshots_dir()
     snaps = list_snapshots()
     if not snaps:
-        click.echo(f"No snapshots in {SNAPSHOTS_DIR}")
+        click.echo(f"No snapshots in {snapshots_dir}")
         return
-    click.echo(f"Snapshots in {SNAPSHOTS_DIR} (newest first):")
+    click.echo(f"Snapshots in {snapshots_dir} (newest first):")
     for s in snaps:
         click.echo(f"  {s['name']:<35} {s['mcp_count']:>3} MCPs  {s['size']:>6} bytes")
-    click.echo(f"\nRestore with: slm-hub config restore <snapshot-name>")
+    click.echo("\nRestore with: slm-hub config restore <snapshot-name>")
 
 
 @config.command("restore")
@@ -449,7 +474,7 @@ def config_restore(snapshot_name: str) -> None:
         click.echo("  launchctl kickstart -k gui/$(id -u)/com.qualixar.slm-mcp-hub")
     except FileNotFoundError as exc:
         click.echo(f"Error: {exc}")
-        click.echo(f"List available with: slm-hub config snapshots")
+        click.echo("List available with: slm-hub config snapshots")
 
 
 cli.add_command(setup)
@@ -474,8 +499,9 @@ def daemon_install(port: int | None) -> None:
         click.echo(generate_systemd_unit(port or cfg.port))
         return
 
-    from slm_mcp_hub.resilience.watchdog import install_launchd, LAUNCHD_LABEL
     import subprocess
+
+    from slm_mcp_hub.resilience.watchdog import LAUNCHD_LABEL, install_launchd
 
     cfg = load_config()
     plist_path = install_launchd(port or cfg.port)
@@ -495,8 +521,9 @@ def daemon_install(port: int | None) -> None:
 @daemon.command("uninstall")
 def daemon_uninstall() -> None:
     """Remove launchd plist and stop the daemon."""
-    from slm_mcp_hub.resilience.watchdog import LAUNCHD_LABEL
     import subprocess
+
+    from slm_mcp_hub.resilience.watchdog import LAUNCHD_LABEL
 
     plist_path = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
     if not plist_path.exists():
@@ -511,8 +538,9 @@ def daemon_uninstall() -> None:
 @daemon.command("status")
 def daemon_status() -> None:
     """Check if the daemon is installed and running."""
-    from slm_mcp_hub.resilience.watchdog import LAUNCHD_LABEL, is_running, read_pid_file
     import subprocess
+
+    from slm_mcp_hub.resilience.watchdog import LAUNCHD_LABEL, is_running, read_pid_file
 
     plist_path = Path.home() / "Library" / "LaunchAgents" / f"{LAUNCHD_LABEL}.plist"
     installed = plist_path.exists()

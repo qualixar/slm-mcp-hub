@@ -6,23 +6,31 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+import tempfile
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from slm_mcp_hub.core.constants import (
     CACHE_DEFAULT_TTL_SECONDS,
     CACHE_MAX_ENTRIES,
-    CONFIG_DIR,
-    CONFIG_FILE,
     DEFAULT_HOST,
     DEFAULT_PORT,
     IDLE_SHUTDOWN_SECONDS,
     MAX_SESSIONS,
     SESSION_TIMEOUT_SECONDS,
+    get_config_dir,
+    get_config_file,
+    get_snapshots_dir,
 )
 
 logger = logging.getLogger(__name__)
+SUPPORTED_TRANSPORTS = frozenset({"stdio", "http", "sse"})
+
+
+class ConfigValidationError(ValueError):
+    """Raised when persisted or programmatic server config is malformed."""
 
 
 @dataclass(frozen=True)
@@ -48,7 +56,7 @@ class HubConfig:
 
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
-    config_dir: Path = CONFIG_DIR
+    config_dir: Path = field(default_factory=get_config_dir)
     mcp_servers: tuple[MCPServerConfig, ...] = ()
     session_timeout_seconds: int = SESSION_TIMEOUT_SECONDS
     max_sessions: int = MAX_SESSIONS
@@ -71,63 +79,110 @@ def _resolve_env_vars(value: str) -> str:
     return value
 
 
-def _resolve_env_in_dict(d: dict[str, Any]) -> dict[str, Any]:
-    """Recursively resolve environment variables in a dict."""
-    result = {}
-    for key, val in d.items():
-        if isinstance(val, str):
-            result[key] = _resolve_env_vars(val)
-        elif isinstance(val, dict):
-            result[key] = _resolve_env_in_dict(val)
-        elif isinstance(val, list):
-            result[key] = [
-                _resolve_env_vars(v) if isinstance(v, str) else v for v in val
-            ]
-        else:
-            result[key] = val
-    return result
+def _validate_string_map(field_name: str, value: object) -> None:
+    if not isinstance(value, Mapping) or any(
+        not isinstance(key, str) or not isinstance(item, str)
+        for key, item in value.items()
+    ):
+        raise ConfigValidationError(
+            f"Server {field_name} must be an object containing string values"
+        )
+
+
+def validate_server_config(config: MCPServerConfig) -> None:
+    """Validate a server config without including sensitive values in errors."""
+    if not isinstance(config.name, str) or not config.name.strip():
+        raise ConfigValidationError("Server name must be a non-empty string")
+    if config.transport not in SUPPORTED_TRANSPORTS:
+        raise ConfigValidationError(
+            "Server transport must be one of: http, sse, stdio"
+        )
+    if not isinstance(config.command, str):
+        raise ConfigValidationError("Server command must be a string")
+    if not isinstance(config.args, tuple) or any(
+        not isinstance(item, str) for item in config.args
+    ):
+        raise ConfigValidationError("Server args must contain only strings")
+    _validate_string_map("env", config.env)
+    if not isinstance(config.url, str):
+        raise ConfigValidationError("Server url must be a string")
+    _validate_string_map("headers", config.headers)
+    for field_name in ("enabled", "always_on", "no_cache"):
+        if not isinstance(getattr(config, field_name), bool):
+            raise ConfigValidationError(f"Server {field_name} must be a boolean")
+    cost = config.cost_per_call_cents
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost < 0:
+        raise ConfigValidationError(
+            "Server cost_per_call_cents must be a non-negative number"
+        )
+
+
+def materialize_server_config(config: MCPServerConfig) -> MCPServerConfig:
+    """Create a runtime config with environment placeholders resolved.
+
+    The input remains the canonical persisted representation. Keeping expansion at
+    the connection boundary prevents config saves and snapshots from receiving
+    resolved credentials.
+    """
+    validate_server_config(config)
+    return replace(
+        config,
+        command=_resolve_env_vars(config.command),
+        args=tuple(_resolve_env_vars(value) for value in config.args),
+        env={key: _resolve_env_vars(value) for key, value in config.env.items()},
+        url=_resolve_env_vars(config.url),
+        headers={
+            key: _resolve_env_vars(value) for key, value in config.headers.items()
+        },
+    )
 
 
 def parse_mcp_server(name: str, raw: dict[str, Any]) -> MCPServerConfig:
-    """Parse a single MCP server entry from config JSON."""
-    resolved = _resolve_env_in_dict(raw)
-
-    if "url" in resolved:
-        transport = resolved.get("type", "http")
-        return MCPServerConfig(
+    """Parse a server while preserving unresolved persisted values."""
+    if not isinstance(raw, dict):
+        raise ConfigValidationError("Server configuration must be an object")
+    if "url" in raw:
+        transport = raw.get("type", "http")
+        config = MCPServerConfig(
             name=name,
             transport=transport,
-            url=resolved["url"],
-            headers=resolved.get("headers", {}),
-            enabled=resolved.get("enabled", True),
-            always_on=resolved.get("always_on", False),
-            no_cache=resolved.get("no_cache", False),
-            cost_per_call_cents=resolved.get("cost_per_call_cents", 0.0),
+            url=raw["url"],
+            headers=raw.get("headers", {}),
+            enabled=raw.get("enabled", True),
+            always_on=raw.get("always_on", False),
+            no_cache=raw.get("no_cache", False),
+            cost_per_call_cents=raw.get("cost_per_call_cents", 0.0),
         )
+        validate_server_config(config)
+        return config
 
-    command = resolved.get("command", "")
-    args = tuple(resolved.get("args", []))
-    env = resolved.get("env", {})
-    return MCPServerConfig(
+    command = raw.get("command", "")
+    args = tuple(raw.get("args", []))
+    env = raw.get("env", {})
+    config = MCPServerConfig(
         name=name,
         transport="stdio",
         command=command,
         args=args,
         env=env,
-        enabled=resolved.get("enabled", True),
-        always_on=resolved.get("always_on", False),
-        no_cache=resolved.get("no_cache", False),
-        cost_per_call_cents=resolved.get("cost_per_call_cents", 0.0),
+        enabled=raw.get("enabled", True),
+        always_on=raw.get("always_on", False),
+        no_cache=raw.get("no_cache", False),
+        cost_per_call_cents=raw.get("cost_per_call_cents", 0.0),
     )
+    validate_server_config(config)
+    return config
 
 
 def load_config(config_path: Path | None = None) -> HubConfig:
     """Load hub configuration from file, with env var overrides."""
-    path = config_path or CONFIG_FILE
+    path = config_path or get_config_file()
 
     if not path.exists():
         logger.info("No config file found at %s, using defaults", path)
         return _apply_env_overrides(HubConfig())
+
+    _secure_config_permissions(path)
 
     with open(path) as f:
         raw = json.load(f)
@@ -140,7 +195,7 @@ def load_config(config_path: Path | None = None) -> HubConfig:
     config = HubConfig(
         host=raw.get("host", DEFAULT_HOST),
         port=raw.get("port", DEFAULT_PORT),
-        config_dir=Path(raw.get("config_dir", str(CONFIG_DIR))),
+        config_dir=Path(raw.get("config_dir", str(get_config_dir()))),
         mcp_servers=servers,
         session_timeout_seconds=raw.get("session_timeout_seconds", SESSION_TIMEOUT_SECONDS),
         max_sessions=raw.get("max_sessions", MAX_SESSIONS),
@@ -148,7 +203,9 @@ def load_config(config_path: Path | None = None) -> HubConfig:
         cache_max_entries=raw.get("cache_max_entries", CACHE_MAX_ENTRIES),
         idle_shutdown_seconds=raw.get("idle_shutdown_seconds", IDLE_SHUTDOWN_SECONDS),
         log_level=raw.get("log_level", "INFO"),
-        cors_origins=tuple(raw.get("cors_origins", ["*"])),
+        cors_origins=tuple(
+            raw.get("cors_origins", ["http://127.0.0.1", "http://localhost"])
+        ),
         plugins_enabled=tuple(raw.get("plugins_enabled", [])),
     )
 
@@ -160,14 +217,20 @@ def _apply_env_overrides(config: HubConfig) -> HubConfig:
     port = int(os.environ.get("SLM_HUB_PORT", config.port))
     host = os.environ.get("SLM_HUB_HOST", config.host)
     log_level = os.environ.get("SLM_HUB_LOG_LEVEL", config.log_level)
+    config_dir = Path(os.environ.get("SLM_HUB_CONFIG_DIR", str(config.config_dir)))
 
-    if port == config.port and host == config.host and log_level == config.log_level:
+    if (
+        port == config.port
+        and host == config.host
+        and log_level == config.log_level
+        and config_dir == config.config_dir
+    ):
         return config
 
     return HubConfig(
         host=host,
         port=port,
-        config_dir=config.config_dir,
+        config_dir=config_dir,
         mcp_servers=config.mcp_servers,
         session_timeout_seconds=config.session_timeout_seconds,
         max_sessions=config.max_sessions,
@@ -198,9 +261,26 @@ def import_vscode_config(vscode_json_path: Path) -> list[MCPServerConfig]:
     return [parse_mcp_server(name, cfg) for name, cfg in servers_raw.items()]
 
 
-SNAPSHOTS_DIR = CONFIG_DIR / "snapshots"
 MAX_SNAPSHOTS = 50
 DROP_GUARD_THRESHOLD = 0.7  # refuse save if MCP count drops below 70% of current
+
+
+def _secure_config_permissions(path: Path) -> None:
+    """Restrict live config and retained snapshots without following symlinks."""
+    if path.exists() and not path.is_symlink():
+        path.chmod(0o600)
+
+    snapshots_dir = get_snapshots_dir(path.parent)
+    if not snapshots_dir.exists() or snapshots_dir.is_symlink():
+        return
+    snapshots_dir.chmod(0o700)
+    # Snapshot retention is capped at MAX_SNAPSHOTS. Limit migration work to
+    # that same bounded set during config load.
+    for snapshot in sorted(
+        snapshots_dir.glob("config-*.json"), reverse=True
+    )[:MAX_SNAPSHOTS]:
+        if snapshot.is_file() and not snapshot.is_symlink():
+            snapshot.chmod(0o600)
 
 
 def _snapshot_existing(path: Path) -> Path | None:
@@ -224,16 +304,19 @@ def _snapshot_existing(path: Path) -> Path | None:
     except (json.JSONDecodeError, OSError):
         return None  # corrupt file, can't snapshot meaningfully
 
-    SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    snapshots_dir = get_snapshots_dir(path.parent)
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
+    snapshots_dir.chmod(0o700)
     import time
     ts = time.strftime("%Y%m%d-%H%M%S")
-    snap_path = SNAPSHOTS_DIR / f"config-{ts}-{existing_count}mcps.json"
+    snap_path = snapshots_dir / f"config-{ts}-{existing_count}mcps.json"
 
     import shutil
     shutil.copy2(path, snap_path)
+    snap_path.chmod(0o600)
 
     # Prune old snapshots — keep MAX_SNAPSHOTS newest
-    snaps = sorted(SNAPSHOTS_DIR.glob("config-*.json"))
+    snaps = sorted(snapshots_dir.glob("config-*.json"))
     while len(snaps) > MAX_SNAPSHOTS:
         snaps[0].unlink(missing_ok=True)
         snaps = snaps[1:]
@@ -247,12 +330,14 @@ def _atomic_write(path: Path, data: dict) -> None:
     Validates JSON parses before rename. If anything fails, original file
     is untouched.
     """
-    import os
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    tmp_path = Path(tmp_name)
 
     try:
-        with open(tmp_path, "w") as f:
+        with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
 
         # Verify the file we just wrote parses back identically
@@ -262,6 +347,7 @@ def _atomic_write(path: Path, data: dict) -> None:
             raise RuntimeError("Atomic write verification failed: mcpServers mismatch")
 
         os.replace(tmp_path, path)
+        path.chmod(0o600)
     except Exception:
         if tmp_path.exists():
             tmp_path.unlink()
@@ -278,14 +364,15 @@ def save_config(config: HubConfig, config_path: Path | None = None, force: bool 
     4. ATOMIC WRITE — write to .tmp, validate, rename.
     """
     import os
-    path = config_path or CONFIG_FILE
+    path = config_path or get_config_file(config.config_dir)
+    _secure_config_permissions(path)
 
     if "PYTEST_CURRENT_TEST" in os.environ:
         real_user_config = (Path.home() / ".slm-mcp-hub" / "config.json").resolve()
         if path.resolve() == real_user_config:
             raise RuntimeError(
                 f"REFUSING to overwrite real user config {path} during pytest. "
-                "Tests must monkeypatch CONFIG_FILE or pass an explicit config_path. "
+                "Tests must pass an explicit config_path. "
                 "This guard prevents the April 26 incident where tests "
                 "nuked 39 MCP server configurations."
             )
@@ -302,7 +389,7 @@ def save_config(config: HubConfig, config_path: Path | None = None, force: bool 
                     f"REFUSING to save: MCP count would drop from {existing_count} to {new_count} "
                     f"(>{int((1-DROP_GUARD_THRESHOLD)*100)}% loss). "
                     f"Pass force=True or use 'slm-hub config restore' if this is unintended. "
-                    f"Snapshots: {SNAPSHOTS_DIR}"
+                    f"Snapshots: {get_snapshots_dir(path.parent)}"
                 )
         except (json.JSONDecodeError, OSError):
             pass  # corrupt existing file — let save proceed
@@ -316,6 +403,7 @@ def save_config(config: HubConfig, config_path: Path | None = None, force: bool 
 
     servers_dict = {}
     for srv in config.mcp_servers:
+        validate_server_config(srv)
         entry: dict[str, Any] = {"enabled": srv.enabled}
         if srv.transport == "stdio":
             entry["command"] = srv.command
@@ -350,15 +438,17 @@ def save_config(config: HubConfig, config_path: Path | None = None, force: bool 
     }
 
     _atomic_write(path, data)
+    _secure_config_permissions(path)
     logger.info("Config saved to %s (%d MCP servers)", path, len(config.mcp_servers))
 
 
 def list_snapshots() -> list[dict[str, Any]]:
     """List all config snapshots, newest first."""
-    if not SNAPSHOTS_DIR.exists():
+    snapshots_dir = get_snapshots_dir()
+    if not snapshots_dir.exists():
         return []
     out = []
-    for snap in sorted(SNAPSHOTS_DIR.glob("config-*.json"), reverse=True):
+    for snap in sorted(snapshots_dir.glob("config-*.json"), reverse=True):
         try:
             with open(snap) as f:
                 d = json.load(f)
@@ -376,11 +466,11 @@ def list_snapshots() -> list[dict[str, Any]]:
 
 def restore_snapshot(snapshot_name: str, target: Path | None = None) -> Path:
     """Restore a snapshot to the live config path. Returns the restored path."""
-    snap = SNAPSHOTS_DIR / snapshot_name
+    snap = get_snapshots_dir() / snapshot_name
     if not snap.exists():
         raise FileNotFoundError(f"Snapshot not found: {snap}")
 
-    target = target or CONFIG_FILE
+    target = target or get_config_file()
 
     # Snapshot the current state before restoring (so restore is reversible)
     _snapshot_existing(target)
@@ -388,6 +478,7 @@ def restore_snapshot(snapshot_name: str, target: Path | None = None) -> Path:
     import shutil
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(snap, target)
+    target.chmod(0o600)
     return target
 
 

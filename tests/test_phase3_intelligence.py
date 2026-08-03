@@ -18,7 +18,6 @@ from slm_mcp_hub.intelligence.filtering import (
 from slm_mcp_hub.intelligence.learning import LearningEngine, ToolCallRecord
 from slm_mcp_hub.intelligence.lifecycle import LifecycleManager
 
-
 # ===========================================================================
 # CacheEngine Tests
 # ===========================================================================
@@ -353,7 +352,6 @@ class TestDetectProjectType:
 
     def test_permission_error_top_level(self, tmp_path):
         """PermissionError on top-level iterdir returns None (lines 108-109)."""
-        from unittest.mock import patch, PropertyMock
 
         # Create a path that raises PermissionError on iterdir
         with patch.object(Path, "iterdir", side_effect=PermissionError("denied")):

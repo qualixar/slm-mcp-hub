@@ -91,7 +91,11 @@ class SessionCoordinator:
 
     def release_all_for_session(self, session_id: str) -> int:
         """Release all locks held by a session (e.g., on disconnect). Returns count."""
-        to_release = [r for r, l in self._locks.items() if l.session_id == session_id]
+        to_release = [
+            resource
+            for resource, lock in self._locks.items()
+            if lock.session_id == session_id
+        ]
         for resource in to_release:
             del self._locks[resource]
         if to_release:
@@ -101,8 +105,9 @@ class SessionCoordinator:
     def _cleanup_expired(self) -> None:
         now = time.time()
         expired = [
-            r for r, l in self._locks.items()
-            if (now - l.acquired_at) > l.timeout_seconds
+            resource
+            for resource, lock in self._locks.items()
+            if (now - lock.acquired_at) > lock.timeout_seconds
         ]
         for resource in expired:
             logger.debug("Lock expired: %s", resource)

@@ -8,9 +8,12 @@ from pathlib import Path
 
 import click
 
-from slm_mcp_hub.core.constants import DEFAULT_PORT
-from slm_mcp_hub.discovery.auto_register import AutoRegister, RegistrationPlan
-from slm_mcp_hub.discovery.client_detector import ClientDetector
+from slm_mcp_hub.discovery.auto_register import (
+    AutoRegister,
+    RegistrationPlan,
+    RegistrationResult,
+)
+from slm_mcp_hub.discovery.client_detector import ClientDetector, DetectedClient
 from slm_mcp_hub.discovery.network import (
     SERVICE_TYPE,
     NetworkDiscovery,
@@ -102,7 +105,7 @@ def setup_register(
                 mcp_key=_mcp_key_for(client),
                 dry_run=False,
             )
-            if hasattr(result, "success"):
+            if isinstance(result, RegistrationResult):
                 if result.success:
                     if result.error == "already_registered":
                         click.echo(f"  {client.display_name}: already registered")

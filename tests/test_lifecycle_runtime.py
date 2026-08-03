@@ -6,8 +6,6 @@ previously lived inside cli/main.py:start()._run().
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
-
 import pytest
 
 from slm_mcp_hub.core.config import HubConfig, MCPServerConfig

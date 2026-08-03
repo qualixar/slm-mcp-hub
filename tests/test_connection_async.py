@@ -94,6 +94,48 @@ class TestMCPConnectionDisconnect:
 
 class TestMCPConnectionErrors:
     @pytest.mark.asyncio
+    async def test_stdio_materializes_placeholders_only_at_spawn(self, monkeypatch):
+        monkeypatch.setenv("HUB_COMMAND", "resolved-command")
+        monkeypatch.setenv("HUB_TOKEN", "resolved-token")
+        spawn = AsyncMock(side_effect=FileNotFoundError)
+        c = MCPConnection(_cfg(
+            command="${HUB_COMMAND}",
+            args=("--token=${HUB_TOKEN}",),
+            env={"TOKEN": "${env:HUB_TOKEN}"},
+        ))
+
+        with patch(
+            "slm_mcp_hub.federation.connection.asyncio.create_subprocess_exec",
+            spawn,
+        ):
+            with pytest.raises(ConnectionError, match="Command not found"):
+                await c._connect_stdio()
+
+        args = spawn.await_args.args
+        env = spawn.await_args.kwargs["env"]
+        assert args[:2] == ("resolved-command", "--token=resolved-token")
+        assert env["TOKEN"] == "resolved-token"
+        assert c._config.command == "${HUB_COMMAND}"
+        assert c._config.env == {"TOKEN": "${env:HUB_TOKEN}"}
+
+    @pytest.mark.asyncio
+    async def test_stdio_does_not_inherit_unrelated_process_secrets(self, monkeypatch):
+        monkeypatch.setenv("UNRELATED_REVIEW_SECRET", "review-secret-sentinel")
+        spawn = AsyncMock(side_effect=FileNotFoundError)
+        c = MCPConnection(_cfg(env={"EXPLICIT_TOKEN": "allowed"}))
+
+        with patch(
+            "slm_mcp_hub.federation.connection.asyncio.create_subprocess_exec",
+            spawn,
+        ):
+            with pytest.raises(ConnectionError, match="Command not found"):
+                await c._connect_stdio()
+
+        child_env = spawn.await_args.kwargs["env"]
+        assert child_env["EXPLICIT_TOKEN"] == "allowed"
+        assert "UNRELATED_REVIEW_SECRET" not in child_env
+
+    @pytest.mark.asyncio
     async def test_connect_command_not_found(self):
         c = MCPConnection(_cfg(command="/no/such/binary_xyz_999"))
         with pytest.raises(ConnectionError, match="Command not found"):
@@ -114,6 +156,26 @@ class TestMCPConnectionErrors:
         c = MCPConnection(_cfg(transport="http", url="http://127.0.0.1:1/mcp"))
         with pytest.raises(ConnectionError, match="initialization failed"):
             await c.connect()
+
+    @pytest.mark.asyncio
+    async def test_http_connection_error_never_leaks_resolved_url_secret(self, monkeypatch):
+        monkeypatch.setenv("HUB_URL_TOKEN", "resolved-url-sentinel")
+        c = MCPConnection(_cfg(
+            transport="http",
+            url="https://example.test/${HUB_URL_TOKEN}/mcp",
+        ))
+        mock_client = AsyncMock()
+        c._send_request = AsyncMock(side_effect=RuntimeError(
+            "request failed at https://example.test/resolved-url-sentinel/mcp"
+        ))
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            with pytest.raises(ConnectionError) as error:
+                await c._connect_http()
+
+        assert c._http_url == "https://example.test/resolved-url-sentinel/mcp"
+        assert "resolved-url-sentinel" not in str(error.value)
+        assert "initialization failed" in str(error.value)
 
     @pytest.mark.asyncio
     async def test_call_tool_not_connected(self):
@@ -397,6 +459,7 @@ class TestMCPConnectionStdioHandshake:
         mock_stdout = AsyncMock()
         mock_stdout.readline = AsyncMock(return_value=b"")
         mock_stderr = AsyncMock()
+        mock_stderr.readline = AsyncMock(return_value=b"")
 
         mock_proc = MagicMock()
         mock_proc.stdin = mock_stdin
@@ -406,15 +469,16 @@ class TestMCPConnectionStdioHandshake:
         mock_proc.wait = AsyncMock()
 
         # Mock _send_request and _send_notification to skip the real JSON-RPC wire
-        original_send_request = c._send_request
-
         call_count = 0
 
         async def mock_send_request(method, params):
             nonlocal call_count
             call_count += 1
             if method == "initialize":
-                return {"protocolVersion": "2024-11-05"}
+                return {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                }
             elif method == "tools/list":
                 return {"tools": [{"name": "t1"}]}
             elif method == "resources/list":
@@ -440,7 +504,7 @@ class TestMCPConnectionStdioHandshake:
         assert c.is_connected is True
         assert len(c.capabilities["tools"]) == 1
         assert c._connected_at > 0
-        assert call_count >= 5  # init + 4 discover calls
+        assert call_count == 2  # initialize + advertised tools/list
 
         await c.disconnect()
 
@@ -456,6 +520,7 @@ class TestMCPConnectionStdioHandshake:
         mock_stdout = AsyncMock()
         mock_stdout.readline = AsyncMock(return_value=b"")
         mock_stderr = AsyncMock()
+        mock_stderr.readline = AsyncMock(return_value=b"")
 
         mock_proc = MagicMock()
         mock_proc.stdin = mock_stdin
@@ -595,6 +660,61 @@ class TestMCPConnectionDiscovery:
         assert c.capabilities["resources"] == []
 
     @pytest.mark.asyncio
+    async def test_discover_skips_unadvertised_resources_and_prompts(self):
+        """Regression: server advertising only `tools` must not be probed for
+        resources/prompts.
+
+        GitLab MCP advertises capabilities {"tools": {...}} and returns HTTP 404
+        for resources/list. Some proxies (mcp-remote) fail to relay that as a
+        JSON-RPC error, so the request future never resolves and the connect
+        hangs until the federation timeout. The fix gates optional probes on the
+        advertised capabilities, so unsupported methods are never called.
+        """
+        c = MCPConnection(_cfg())
+        c._server_capabilities = {"tools": {"listChanged": False}}
+        called: list[str] = []
+
+        async def mock_send(method, params):
+            called.append(method)
+            if method == "tools/list":
+                return {"tools": [{"name": "a"}]}
+            # Simulate the hang-inducing method: if it were ever called, the test
+            # would deadlock; instead fail loudly to prove it is never invoked.
+            raise AssertionError(f"unsupported method probed: {method}")
+
+        c._send_request = mock_send
+        await c._discover_capabilities()
+
+        assert called == ["tools/list"]
+        assert len(c.capabilities["tools"]) == 1
+        assert c.capabilities["resources"] == []
+        assert c.capabilities["prompts"] == []
+
+    @pytest.mark.asyncio
+    async def test_discover_probes_advertised_resources_and_prompts(self):
+        """When the server advertises resources/prompts, they are probed."""
+        c = MCPConnection(_cfg())
+        c._server_capabilities = {"tools": {}, "resources": {}, "prompts": {}}
+        called: list[str] = []
+
+        async def mock_send(method, params):
+            called.append(method)
+            return {
+                "tools/list": {"tools": []},
+                "resources/list": {"resources": [{"uri": "b"}]},
+                "resources/templates/list": {"resourceTemplates": []},
+                "prompts/list": {"prompts": [{"name": "d"}]},
+            }[method]
+
+        c._send_request = mock_send
+        await c._discover_capabilities()
+
+        assert "resources/list" in called
+        assert "prompts/list" in called
+        assert len(c.capabilities["resources"]) == 1
+        assert len(c.capabilities["prompts"]) == 1
+
+    @pytest.mark.asyncio
     async def test_send_request_http_handles_string_error(self):
         """HTTP MCP returns an error field as a string (like {"error": "Unauthorized"}).
         Before fix: err.get("code") raises AttributeError.
@@ -613,7 +733,8 @@ class TestMCPConnectionDiscovery:
 
         with pytest.raises(RuntimeError) as exc_info:
             await c._send_request_http("initialize", {})
-        assert "test error: [-1] Unauthorized" in str(exc_info.value)
+        assert "test JSON-RPC error [-1]" in str(exc_info.value)
+        assert "Unauthorized" not in str(exc_info.value)
 
 
 # ===========================================================================

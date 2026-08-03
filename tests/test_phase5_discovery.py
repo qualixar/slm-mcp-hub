@@ -1,7 +1,6 @@
 """Tests for Phase 5: Discovery & Multi-Client Setup."""
 
 from __future__ import annotations
-from slm_mcp_hub.core.constants import VERSION
 
 import json
 from pathlib import Path
@@ -11,8 +10,8 @@ import pytest
 from click.testing import CliRunner
 
 from slm_mcp_hub.cli.main import cli
-from slm_mcp_hub.core.config import save_config, HubConfig, MCPServerConfig
-from slm_mcp_hub.core.constants import DEFAULT_PORT
+from slm_mcp_hub.core.config import HubConfig, MCPServerConfig, save_config
+from slm_mcp_hub.core.constants import DEFAULT_PORT, VERSION
 from slm_mcp_hub.discovery.auto_register import (
     AutoRegister,
     ImportResult,
@@ -26,17 +25,16 @@ from slm_mcp_hub.discovery.client_detector import (
     ClientDetector,
     DetectedClient,
     _build_known_clients,
-    _extract_mcp_count,
     _check_hub_registered,
+    _extract_mcp_count,
 )
 from slm_mcp_hub.discovery.network import (
+    SERVICE_TYPE,
     DiscoveredHub,
     NetworkDiscovery,
     _DiscoveryListener,
     is_zeroconf_available,
-    SERVICE_TYPE,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

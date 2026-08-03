@@ -27,7 +27,6 @@ from slm_mcp_hub.lifecycle.config_diff import ConfigDiff, diff_configs
 from slm_mcp_hub.lifecycle.notifier import ChangeNotifier
 from slm_mcp_hub.lifecycle.reloader import ConfigReloader, ReloadError
 
-
 # ---------- helpers ----------
 
 def _srv(name: str, *, transport: str = "stdio", command: str = "echo",

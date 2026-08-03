@@ -11,10 +11,32 @@ from collections import deque
 from enum import Enum
 from typing import Any
 
-from slm_mcp_hub.core.config import MCPServerConfig
-from slm_mcp_hub.core.constants import DEFAULT_TOOL_TIMEOUT_S, MCP_REQUEST_TIMEOUT_MS, VERSION
+from slm_mcp_hub.core.config import MCPServerConfig, materialize_server_config
+from slm_mcp_hub.core.constants import (
+    MCP_REQUEST_TIMEOUT_MS,
+    VERSION,
+)
 
 logger = logging.getLogger(__name__)
+
+_INHERITED_ENV_KEYS = (
+    "APPDATA",
+    "COMSPEC",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "LOCALAPPDATA",
+    "PATH",
+    "PATHEXT",
+    "SHELL",
+    "SYSTEMROOT",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "USERPROFILE",
+    "WINDIR",
+)
 
 
 class ConnectionState(str, Enum):
@@ -42,10 +64,18 @@ class MCPConnection:
             "resource_templates": [],
             "prompts": [],
         }
+        # Capabilities the server advertised in its initialize response, used to
+        # gate optional resources/prompts discovery probes. None means "not
+        # captured" (e.g. direct unit-test calls), in which case we fall back to
+        # probing everything for backward compatibility.
+        self._server_capabilities: dict[str, Any] | None = None
         self._request_id = 0
         self._pending: dict[int, asyncio.Future[dict]] = {}
         self._reader_task: asyncio.Task | None = None
         self._stderr_task: asyncio.Task | None = None
+        self._http_client: Any = None
+        self._http_url = ""
+        self._http_session_id: str | None = None
         self._connected_at: float = 0.0
         self._in_flight: int = 0
         self._drain_event: asyncio.Event | None = None
@@ -56,6 +86,7 @@ class MCPConnection:
         # Rolling tail of recent stderr lines for diagnostic error messages
         # when a child process exits unexpectedly.
         self._stderr_tail: deque[str] = deque(maxlen=20)
+        self._stderr_output_seen = False
 
     @property
     def name(self) -> str:
@@ -133,7 +164,7 @@ class MCPConnection:
             self._process = None
 
         # Close HTTP client if present
-        if hasattr(self, "_http_client") and self._http_client:
+        if self._http_client is not None:
             try:
                 await self._http_client.aclose()
             except Exception:
@@ -213,11 +244,15 @@ class MCPConnection:
 
     async def _connect_stdio(self) -> None:
         """Start a child process and perform MCP initialization handshake."""
-        cmd = self._config.command
-        args = list(self._config.args)
+        runtime_config = materialize_server_config(self._config)
+        cmd = runtime_config.command
+        args = list(runtime_config.args)
 
-        env = dict(os.environ)
-        env.update(self._config.env)
+        # Child MCPs receive only process-launch essentials plus their explicit
+        # per-server configuration. In particular, they must not inherit hub
+        # credentials or unrelated values loaded from shared secret files.
+        env = {key: os.environ[key] for key in _INHERITED_ENV_KEYS if key in os.environ}
+        env.update(runtime_config.env)
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -228,12 +263,14 @@ class MCPConnection:
                 env=env,
                 limit=10 * 1024 * 1024,  # 10MB readline buffer for large MCP responses
             )
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
             self._state = ConnectionState.ERROR
-            raise ConnectionError(f"Command not found: {cmd}")
+            raise ConnectionError(f"Command not found for MCP {self.name}") from exc
         except OSError as exc:
             self._state = ConnectionState.ERROR
-            raise ConnectionError(f"Failed to start MCP {self.name}: {exc}")
+            raise ConnectionError(
+                f"Failed to start MCP {self.name} ({type(exc).__name__})"
+            ) from None
 
         # Start reading stdout (JSON-RPC responses)
         self._reader_task = asyncio.create_task(self._read_stdout())
@@ -251,6 +288,11 @@ class MCPConnection:
             # Send initialized notification (no response expected)
             await self._send_notification("notifications/initialized", {})
 
+            # Record advertised capabilities so discovery only probes what the
+            # server supports (see _discover_capabilities).
+            caps = init_result.get("capabilities") if isinstance(init_result, dict) else None
+            self._server_capabilities = caps if isinstance(caps, dict) else None
+
             # Discover capabilities
             await self._discover_capabilities()
 
@@ -263,30 +305,31 @@ class MCPConnection:
                 len(self._capabilities["resources"]),
                 len(self._capabilities["prompts"]),
             )
-        except Exception as exc:
+        except Exception:
             self._state = ConnectionState.ERROR
             await self.disconnect()
-            raise ConnectionError(f"MCP {self.name} initialization failed: {exc}")
+            raise ConnectionError(f"MCP {self.name} initialization failed") from None
 
     async def _connect_http(self) -> None:
         """Connect to a remote HTTP MCP server via Streamable HTTP."""
         try:
             import httpx
-        except ImportError:
+        except ImportError as exc:
             self._state = ConnectionState.ERROR
             raise ConnectionError(
-                f"httpx required for HTTP transport. Install with: pip install httpx"
-            )
+                "httpx required for HTTP transport. Install with: pip install httpx"
+            ) from exc
 
-        self._http_url = self._config.url
+        runtime_config = materialize_server_config(self._config)
+        self._http_url = runtime_config.url
         self._http_client = httpx.AsyncClient(
             headers={
                 "Accept": "application/json, text/event-stream",
-                **self._config.headers,
+                **runtime_config.headers,
             },
             timeout=httpx.Timeout(MCP_REQUEST_TIMEOUT_MS / 1000),
         )
-        self._http_session_id: str | None = None
+        self._http_session_id = None
 
         try:
             init_result = await self._send_request("initialize", {
@@ -296,6 +339,12 @@ class MCPConnection:
             })
 
             await self._send_notification("notifications/initialized", {})
+
+            # Record advertised capabilities so discovery only probes what the
+            # server supports (see _discover_capabilities).
+            caps = init_result.get("capabilities") if isinstance(init_result, dict) else None
+            self._server_capabilities = caps if isinstance(caps, dict) else None
+
             await self._discover_capabilities()
 
             self._state = ConnectionState.CONNECTED
@@ -309,12 +358,25 @@ class MCPConnection:
             )
         except Exception as exc:
             self._state = ConnectionState.ERROR
-            if hasattr(self, "_http_client"):
+            if self._http_client is not None:
                 await self._http_client.aclose()
-            raise ConnectionError(f"HTTP MCP {self.name} initialization failed: {exc}")
+            raise ConnectionError(
+                f"HTTP MCP {self.name} initialization failed "
+                f"({type(exc).__name__})"
+            ) from None
 
     async def _discover_capabilities(self) -> None:
-        """Discover all tools, resources, and prompts from the MCP server."""
+        """Discover tools, resources, and prompts from the MCP server.
+
+        Optional resources/prompts probes are gated on the capabilities the
+        server advertised in its initialize response. Some servers (e.g. the
+        GitLab MCP server) return HTTP 404 for methods they don't support, and
+        some proxies (e.g. mcp-remote) fail to relay that as a JSON-RPC error —
+        leaving the request future unresolved and hanging the connect until the
+        federation timeout. Respecting advertised capabilities avoids probing
+        unsupported methods entirely. When capabilities weren't captured
+        (``_server_capabilities is None``), fall back to probing everything.
+        """
         try:
             tools_result = await self._send_request("tools/list", {})
             # Guard: some HTTP MCPs return a non-dict result (e.g. a bare string).
@@ -329,26 +391,36 @@ class MCPConnection:
         except Exception as exc:
             logger.warning("Failed to list tools for %s: %s", self.name, exc)
 
-        try:
-            res_result = await self._send_request("resources/list", {})
-            if isinstance(res_result, dict):
-                self._capabilities["resources"] = res_result.get("resources", [])
-        except Exception as exc:
-            logger.debug("No resources for %s: %s", self.name, exc)
+        server_caps = self._server_capabilities
+        probe_resources = server_caps is None or "resources" in server_caps
+        probe_prompts = server_caps is None or "prompts" in server_caps
 
-        try:
-            tmpl_result = await self._send_request("resources/templates/list", {})
-            if isinstance(tmpl_result, dict):
-                self._capabilities["resource_templates"] = tmpl_result.get("resourceTemplates", [])
-        except Exception as exc:
-            logger.debug("No resource templates for %s: %s", self.name, exc)
+        if probe_resources:
+            try:
+                res_result = await self._send_request("resources/list", {})
+                if isinstance(res_result, dict):
+                    self._capabilities["resources"] = res_result.get("resources", [])
+            except Exception as exc:
+                logger.debug("No resources for %s: %s", self.name, exc)
 
-        try:
-            prompts_result = await self._send_request("prompts/list", {})
-            if isinstance(prompts_result, dict):
-                self._capabilities["prompts"] = prompts_result.get("prompts", [])
-        except Exception as exc:
-            logger.debug("No prompts for %s: %s", self.name, exc)
+            try:
+                tmpl_result = await self._send_request("resources/templates/list", {})
+                if isinstance(tmpl_result, dict):
+                    self._capabilities["resource_templates"] = tmpl_result.get("resourceTemplates", [])
+            except Exception as exc:
+                logger.debug("No resource templates for %s: %s", self.name, exc)
+        else:
+            logger.debug("%s did not advertise resources — skipping resources discovery", self.name)
+
+        if probe_prompts:
+            try:
+                prompts_result = await self._send_request("prompts/list", {})
+                if isinstance(prompts_result, dict):
+                    self._capabilities["prompts"] = prompts_result.get("prompts", [])
+            except Exception as exc:
+                logger.debug("No prompts for %s: %s", self.name, exc)
+        else:
+            logger.debug("%s did not advertise prompts — skipping prompts discovery", self.name)
 
     async def _send_request(self, method: str, params: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
         """Send a JSON-RPC request and wait for the response.
@@ -359,7 +431,7 @@ class MCPConnection:
             timeout_s: Per-call timeout override. Uses server default if None.
         """
         if self._config.transport in ("http", "sse"):
-            return await self._send_request_http(method, params)
+            return await self._send_request_http(method, params, timeout_s=timeout_s)
         return await self._send_request_stdio(method, params, timeout_s=timeout_s)
 
     async def _send_request_stdio(self, method: str, params: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
@@ -397,9 +469,9 @@ class MCPConnection:
         try:
             effective_timeout = timeout_s if timeout_s is not None else (MCP_REQUEST_TIMEOUT_MS / 1000)
             result = await asyncio.wait_for(future, timeout=effective_timeout)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             self._pending.pop(req_id, None)
-            raise TimeoutError(f"MCP {self.name} request {method} timed out")
+            raise TimeoutError(f"MCP {self.name} request {method} timed out") from exc
         finally:
             self._in_flight -= 1
             if self._in_flight == 0 and self._drain_event is not None:
@@ -413,9 +485,14 @@ class MCPConnection:
 
         return result.get("result", {})
 
-    async def _send_request_http(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+    async def _send_request_http(
+        self,
+        method: str,
+        params: dict[str, Any],
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
         """Send via HTTP POST to remote MCP server."""
-        if not hasattr(self, "_http_client"):
+        if self._http_client is None:
             raise ConnectionError(f"MCP {self.name} HTTP client not initialized")
 
         self._request_id += 1
@@ -435,7 +512,23 @@ class MCPConnection:
         if hasattr(self, "_http_session_id") and self._http_session_id:
             headers["Mcp-Session-Id"] = self._http_session_id
 
-        response = await self._http_client.post(self._http_url, json=message, headers=headers)
+        effective_timeout = timeout_s if timeout_s is not None else (MCP_REQUEST_TIMEOUT_MS / 1000)
+        try:
+            response = await asyncio.wait_for(
+                self._http_client.post(self._http_url, json=message, headers=headers),
+                timeout=effective_timeout,
+            )
+        except asyncio.TimeoutError:
+            raise TimeoutError(f"MCP {self.name} request {method} timed out") from None
+        except Exception as exc:
+            raise ConnectionError(
+                f"MCP {self.name} HTTP request failed ({type(exc).__name__})"
+            ) from None
+
+        if not 200 <= response.status_code < 300:
+            raise ConnectionError(
+                f"MCP {self.name} HTTP {response.status_code} response"
+            )
 
         # Capture session ID from response
         session_id = response.headers.get("mcp-session-id")
@@ -447,22 +540,21 @@ class MCPConnection:
 
         # Handle SSE responses — extract the JSON-RPC message from event stream
         content_type = response.headers.get("content-type", "")
-        if "text/event-stream" in content_type:
-            result = self._parse_sse_response(response.text)
-        else:
-            result = response.json()
+        try:
+            if "text/event-stream" in content_type:
+                result = self._parse_sse_response(response.text)
+            else:
+                result = response.json()
+        except (TypeError, ValueError):
+            raise ConnectionError(f"MCP {self.name} returned invalid JSON") from None
+
+        if not isinstance(result, dict):
+            raise ConnectionError(f"MCP {self.name} returned invalid JSON")
 
         if "error" in result:
             err = result["error"]
-            if isinstance(err, dict):
-                code = err.get("code", -1)
-                msg = err.get("message", "unknown")
-            else:
-                code = -1
-                msg = str(err)
-            raise RuntimeError(
-                f"MCP {self.name} error: [{code}] {msg}"
-            )
+            code = err.get("code", -1) if isinstance(err, dict) else -1
+            raise RuntimeError(f"MCP {self.name} JSON-RPC error [{code}]")
 
         return result.get("result", {})
 
@@ -487,7 +579,7 @@ class MCPConnection:
 
     async def _send_notification_http(self, method: str, params: dict[str, Any]) -> None:
         """Send notification via HTTP POST."""
-        if not hasattr(self, "_http_client"):
+        if self._http_client is None:
             return
 
         message = {
@@ -532,23 +624,16 @@ class MCPConnection:
                 line = await self._process.stderr.readline()
                 if not line:
                     break
-                text = line.decode("utf-8", errors="replace").rstrip()
-                if text:
-                    self._stderr_tail.append(text)
-                    logger.debug("[%s stderr] %s", self.name, text)
+                if line.strip():
+                    self._stderr_output_seen = True
+                    logger.debug("MCP %s emitted stderr output (content omitted)", self.name)
         except asyncio.CancelledError:
             pass
         except Exception:
             pass
 
     def _exit_diagnostic(self) -> str:
-        """Build a helpful error message including command + exit code + stderr tail.
-
-        Surfaces actionable context when an MCP child process dies early:
-        - what command we tried to run
-        - the OS exit code if available
-        - the last few stderr lines (often contain the actual error)
-        """
+        """Build an actionable child-exit error without exposing configuration."""
         parts: list[str] = [f"MCP '{self.name}' child process exited"]
 
         exit_code = None
@@ -557,19 +642,8 @@ class MCPConnection:
         if exit_code is not None:
             parts.append(f"with exit code {exit_code}")
 
-        if self._config.transport == "stdio":
-            cmd_summary = self._config.command
-            if self._config.args:
-                cmd_summary += " " + " ".join(self._config.args[:4])
-                if len(self._config.args) > 4:
-                    cmd_summary += " ..."
-            parts.append(f"(command: {cmd_summary!r})")
-        elif self._config.url:
-            parts.append(f"(url: {self._config.url!r})")
-
-        if self._stderr_tail:
-            tail = " | ".join(list(self._stderr_tail)[-3:])
-            parts.append(f"stderr tail: {tail}")
+        if self._stderr_output_seen or self._stderr_tail:
+            parts.append("stderr output was captured and omitted")
         else:
             parts.append("no stderr output captured — verify the command is an MCP server, not a one-shot command")
 
@@ -593,7 +667,7 @@ class MCPConnection:
                 try:
                     msg = json.loads(text)
                 except json.JSONDecodeError:
-                    logger.debug("Non-JSON from %s: %s", self.name, text[:200])
+                    logger.debug("Non-JSON output from %s (content omitted)", self.name)
                     continue
 
                 req_id = msg.get("id")
@@ -607,7 +681,7 @@ class MCPConnection:
         except asyncio.CancelledError:
             pass
         except Exception as exc:
-            logger.error("Reader error for %s: %s", self.name, exc)
+            logger.error("Reader error for %s (%s)", self.name, type(exc).__name__)
             self._state = ConnectionState.ERROR
         finally:
             # Fail all pending futures with a diagnostic that includes the

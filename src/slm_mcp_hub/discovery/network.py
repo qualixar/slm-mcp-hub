@@ -6,7 +6,7 @@ import logging
 import socket
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from slm_mcp_hub.core.constants import VERSION
 
@@ -134,7 +134,7 @@ class NetworkDiscovery:
         try:
             zc = Zeroconf()
             listener = _DiscoveryListener()
-            ServiceBrowser(zc, SERVICE_TYPE, listener)
+            ServiceBrowser(zc, SERVICE_TYPE, cast(Any, listener))
 
             time.sleep(timeout_seconds)
 

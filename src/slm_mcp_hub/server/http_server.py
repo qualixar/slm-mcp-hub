@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import secrets
 from typing import Any
 
 from fastapi import FastAPI, Request, Response
@@ -19,17 +21,41 @@ from slm_mcp_hub.server.proxy_endpoint import ProxyEndpoint
 from slm_mcp_hub.session.manager import SessionManager
 
 logger = logging.getLogger(__name__)
+MODERN_PROTOCOL_VERSION = "2026-07-28"
+LEGACY_PROTOCOL_VERSIONS = frozenset(
+    {"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
+)
+LOOPBACK_ORIGIN_REGEX = r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$"
+
+
+def _jsonrpc_error(
+    request_id: Any,
+    code: int,
+    message: str,
+    *,
+    status_code: int = 400,
+    data: dict[str, Any] | None = None,
+) -> JSONResponse:
+    error: dict[str, Any] = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return JSONResponse(
+        status_code=status_code,
+        content={"jsonrpc": "2.0", "id": request_id, "error": error},
+    )
 
 
 def create_app(
     mcp_endpoint: MCPEndpoint,
     session_manager: SessionManager,
-    cors_origins: tuple[str, ...] = ("*",),
+    cors_origins: tuple[str, ...] = ("http://127.0.0.1", "http://localhost"),
     hub_status_fn: Any = None,
     proxy_endpoint: ProxyEndpoint | None = None,
     registry: Any = None,
     reloader: Any = None,
     conn_manager: Any = None,
+    api_key: str | None = None,
+    stateless: bool | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -49,11 +75,32 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(cors_origins),
+        allow_origin_regex=LOOPBACK_ORIGIN_REGEX,
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["Mcp-Session-Id"],
     )
+
+    effective_api_key = api_key or os.environ.get("SLM_HUB_API_KEY")
+    if stateless is None:
+        stateless = os.environ.get("SLM_HUB_STATELESS", "").lower() in {
+            "1", "true", "yes", "on",
+        }
+
+    @app.middleware("http")
+    async def require_api_key(request: Request, call_next: Any) -> Response:
+        """Authenticate MCP and management routes when hub auth is enabled."""
+        if not effective_api_key or request.url.path == f"{API_PREFIX}/health":
+            return await call_next(request)
+
+        supplied = request.headers.get("x-slm-hub-api-key", "")
+        authorization = request.headers.get("authorization", "")
+        if authorization.lower().startswith("bearer "):
+            supplied = authorization[7:]
+        if not supplied or not secrets.compare_digest(supplied, effective_api_key):
+            return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+        return await call_next(request)
 
     # ── MCP Streamable HTTP Endpoint ─────────────────────────────────────
 
@@ -65,9 +112,57 @@ def create_app(
         try:
             body = await request.json()
         except Exception:
-            return JSONResponse(
-                status_code=400,
-                content={"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}},
+            return _jsonrpc_error(None, -32700, "Parse error")
+        if not isinstance(body, dict):
+            return _jsonrpc_error(None, -32600, "Invalid Request")
+
+        request_id = body.get("id")
+        params = body.get("params")
+        params = params if isinstance(params, dict) else {}
+        meta = params.get("_meta")
+        meta = meta if isinstance(meta, dict) else {}
+        header_version = request.headers.get("mcp-protocol-version", "")
+        meta_version = meta.get("io.modelcontextprotocol/protocolVersion")
+
+        modern_request = meta_version is not None or header_version == MODERN_PROTOCOL_VERSION
+        if modern_request:
+            if not isinstance(meta_version, str) or not meta_version:
+                return _jsonrpc_error(request_id, -32602, "Invalid params")
+            if not header_version or header_version != meta_version:
+                return _jsonrpc_error(request_id, -32020, "Header mismatch")
+            if meta_version != MODERN_PROTOCOL_VERSION:
+                return _jsonrpc_error(
+                    request_id,
+                    -32022,
+                    "Unsupported protocol version",
+                    data={
+                        "supported": [MODERN_PROTOCOL_VERSION],
+                        "requested": meta_version,
+                    },
+                )
+            client_info = meta.get("io.modelcontextprotocol/clientInfo")
+            client_capabilities = meta.get(
+                "io.modelcontextprotocol/clientCapabilities"
+            )
+            if not isinstance(client_info, dict) or not isinstance(
+                client_capabilities, dict
+            ):
+                return _jsonrpc_error(request_id, -32602, "Invalid params")
+        elif header_version and header_version not in LEGACY_PROTOCOL_VERSIONS:
+            return _jsonrpc_error(
+                request_id,
+                -32022,
+                "Unsupported protocol version",
+                data={
+                    "supported": [MODERN_PROTOCOL_VERSION],
+                    "requested": header_version,
+                },
+            )
+
+        sessionless_request = bool(stateless or modern_request)
+        if body.get("method") == "server/discover" and not modern_request:
+            return _jsonrpc_error(
+                request_id, -32601, "Method not found", status_code=404
             )
 
         # Always create/register a session on initialize.
@@ -76,37 +171,73 @@ def create_app(
         # provided, so the client-supplied ID was never registered — causing every
         # subsequent call to fail with "Session not found".
         is_initialize = body.get("method") == "initialize"
-        if is_initialize:
-            client_info = body.get("params", {}).get("clientInfo", {})
+        if is_initialize and not sessionless_request:
+            # Defensive: a malformed client may send a non-object 'params' or
+            # 'clientInfo'. This runs before handle_jsonrpc's validation, so it
+            # must not assume either is a dict.
+            raw_params = body.get("params")
+            raw_client_info = raw_params.get("clientInfo") if isinstance(raw_params, dict) else None
+            client_info = raw_client_info if isinstance(raw_client_info, dict) else {}
+            raw_name = client_info.get("name")
+            client_name = raw_name if isinstance(raw_name, str) and raw_name.strip() else "unknown"
             existing = session_manager.get_session(session_id) if session_id else None
             if existing is None:
                 # Create session, honouring any client-supplied ID
                 session_id = session_manager.create_session(
-                    client_name=client_info.get("name", "unknown"),
+                    client_name=client_name,
                     session_id=session_id or None,
                 )
 
-        if not session_id:
-            return JSONResponse(
-                status_code=400,
-                content={"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32000, "message": "Missing Mcp-Session-Id header"}},
+        if sessionless_request:
+            session_id = "stateless"
+        elif not session_id:
+            return _jsonrpc_error(
+                request_id, -32000, "Missing Mcp-Session-Id header"
             )
 
         # Verify session exists (for non-initialize requests)
         session = session_manager.get_session(session_id)
-        if session is None and not is_initialize:
-            return JSONResponse(
-                status_code=404,
-                content={"jsonrpc": "2.0", "id": body.get("id"), "error": {"code": -32001, "message": "Session not found"}},
-            )
+        if session is None and not is_initialize and not sessionless_request:
+            recovery_enabled = os.environ.get(
+                "SLM_HUB_SESSION_RECOVERY", ""
+            ).strip().lower() in {"1", "true", "yes", "on"}
+            if not recovery_enabled:
+                return JSONResponse(
+                    status_code=404,
+                    content={
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "error": {"code": -32001, "message": "Session not found"},
+                    },
+                )
+            try:
+                session_manager.create_session(
+                    client_name="recovered", session_id=session_id
+                )
+            except ValueError:
+                return _jsonrpc_error(
+                    request_id,
+                    -32003,
+                    "Session capacity reached",
+                    status_code=429,
+                )
+            logger.warning("Recovered unknown client session after restart")
 
         result = await mcp_endpoint.handle_jsonrpc(session_id, body)
 
         if result is None:
             return Response(status_code=204)
 
-        headers = {"Mcp-Session-Id": session_id}
+        headers = {} if sessionless_request else {"Mcp-Session-Id": session_id}
         return JSONResponse(content=result, headers=headers)
+
+    @app.delete(MCP_ENDPOINT_PATH)
+    async def mcp_delete(request: Request) -> Response:
+        """Idempotently terminate a legacy Streamable HTTP session."""
+        session_id = request.headers.get("mcp-session-id", "")
+        if session_id:
+            session_manager.destroy_session(session_id)
+        return Response(status_code=204)
 
     # ── Management API ───────────────────────────────────────────────────
 
@@ -247,7 +378,7 @@ def create_app(
             except ReloadError as exc:
                 return {"success": False, "error": str(exc)}
             except Exception as exc:
-                logger.exception("Reload crashed")
-                return {"success": False, "error": str(exc)}
+                logger.error("Reload crashed (%s)", type(exc).__name__)
+                return {"success": False, "error": "Reload failed unexpectedly"}
 
     return app

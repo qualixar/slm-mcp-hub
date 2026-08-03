@@ -8,12 +8,10 @@ from typing import Any
 
 from slm_mcp_hub.federation.namespace import (
     make_unique_id,
-    namespace_name,
     namespace_prompt,
     namespace_resource,
     namespace_resource_template,
     namespace_tool,
-    parse_namespaced,
     safe_server_id,
 )
 

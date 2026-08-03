@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from io import StringIO
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest

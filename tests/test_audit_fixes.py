@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import json
-import os
-import time
-from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 from click.testing import CliRunner
 
 from slm_mcp_hub.cli.main import cli
-from slm_mcp_hub.core.config import HubConfig, generate_default_config, load_config, save_config
+from slm_mcp_hub.core.config import HubConfig, generate_default_config
 from slm_mcp_hub.core.hub import HubOrchestrator, reset_hub
 from slm_mcp_hub.core.registry import CapabilityRegistry
 from slm_mcp_hub.federation.router import FederationRouter, RouteResult
@@ -124,9 +121,7 @@ class TestM3CLICoverage:
         assert "--port" in result.output
 
     def test_cli_config_init_new(self, tmp_path, monkeypatch):
-        path = tmp_path / "config.json"
-        monkeypatch.setattr("slm_mcp_hub.cli.main.CONFIG_FILE", path)
-        monkeypatch.setattr("slm_mcp_hub.core.config.CONFIG_FILE", path)
+        monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
         result = runner.invoke(cli, ["config", "init"], input="y\n")
         assert result.exit_code == 0
 
@@ -146,8 +141,7 @@ class TestM3CLICoverage:
     def test_cli_config_import_already_exists(self, tmp_path, monkeypatch):
         """Import idempotency — second import says nothing new."""
         config_path = tmp_path / "config.json"
-        monkeypatch.setattr("slm_mcp_hub.cli.main.CONFIG_FILE", config_path)
-        monkeypatch.setattr("slm_mcp_hub.core.config.CONFIG_FILE", config_path)
+        monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
 
         claude = tmp_path / "claude.json"
         claude.write_text(json.dumps({"mcpServers": {"sample": {"command": "echo", "args": []}}}))
@@ -168,7 +162,7 @@ class TestM4IntegrationFlow:
         reset_hub()
         config = HubConfig(config_dir=tmp_path)
 
-        async with HubOrchestrator(config) as hub:
+        async with HubOrchestrator(config):
             # Create registry with test tools
             reg = CapabilityRegistry()
             reg.sync({
