@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -52,7 +51,7 @@ class TestConnectionManager:
 
         with patch("slm_mcp_hub.federation.manager.MCPConnection", return_value=mock_conn):
             mgr = ConnectionManager(config_with_servers, registry)
-            failed = await mgr.connect_all()
+            await mgr.connect_all()
 
         # Only 2 enabled servers attempted (disabled_srv skipped)
         assert len(mgr.connections) == 2

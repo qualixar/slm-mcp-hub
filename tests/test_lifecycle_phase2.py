@@ -24,7 +24,6 @@ from slm_mcp_hub.federation.connection import ConnectionState, MCPConnection
 from slm_mcp_hub.federation.manager import ConnectionManager
 from slm_mcp_hub.federation.router import FederationRouter
 
-
 # ---------- Fixtures ----------
 
 @pytest.fixture()

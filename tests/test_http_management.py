@@ -12,7 +12,7 @@ from slm_mcp_hub.server.http_server import create_app
 from slm_mcp_hub.session.manager import SessionManager
 
 
-def _client() -> tuple[TestClient, MagicMock, MagicMock]:
+def _client(api_key: str | None = None) -> tuple[TestClient, MagicMock, MagicMock]:
     endpoint = MagicMock()
     proxy = MagicMock()
     proxy.handle_jsonrpc = AsyncMock(return_value={
@@ -45,8 +45,31 @@ def _client() -> tuple[TestClient, MagicMock, MagicMock]:
         registry=registry,
         reloader=reloader,
         conn_manager=conn_manager,
+        api_key=api_key,
     )
     return TestClient(app), proxy, reloader
+
+
+def test_api_key_protects_mcp_and_management_routes_but_not_health() -> None:
+    client, _, _ = _client(api_key="test-hub-key")
+
+    assert client.get("/api/health").status_code == 200
+    assert client.get("/api/servers").status_code == 401
+    assert client.post("/mcp", json={"jsonrpc": "2.0", "id": 1}).status_code == 401
+
+    header = {"X-SLM-Hub-API-Key": "test-hub-key"}
+    assert client.get("/api/servers", headers=header).status_code == 200
+
+
+def test_api_key_accepts_bearer_and_rejects_wrong_values() -> None:
+    client, _, _ = _client(api_key="test-hub-key")
+
+    assert client.get(
+        "/api/servers", headers={"Authorization": "Bearer wrong"}
+    ).status_code == 401
+    assert client.get(
+        "/api/servers", headers={"Authorization": "Bearer test-hub-key"}
+    ).status_code == 200
 
 
 def test_session_greeting_summarizes_tools_by_server() -> None:

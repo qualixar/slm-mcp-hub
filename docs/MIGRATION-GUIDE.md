@@ -83,7 +83,7 @@ slm-hub start
 Watch the output. You should see all your MCPs connecting:
 
 ```
-SLM MCP Hub v0.1.0 running on http://127.0.0.1:52414/mcp
+SLM MCP Hub v0.2.6 running on http://127.0.0.1:52414/mcp
   MCP servers: 38/38 connected
   Tools: 462
 ```

@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from slm_mcp_hub.core.constants import VERSION
 from slm_mcp_hub.plugins.base import HubPlugin
 from slm_mcp_hub.plugins.slm_http import (
     create_slm_http_client,
@@ -87,7 +88,7 @@ class MeshPlugin(HubPlugin):
 
     @property
     def version(self) -> str:
-        return "0.1.2"
+        return VERSION
 
     @property
     def available(self) -> bool:

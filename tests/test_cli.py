@@ -11,7 +11,6 @@ from click.testing import CliRunner
 from slm_mcp_hub.cli.main import cli, main
 from slm_mcp_hub.core.hub import reset_hub
 
-
 runner = CliRunner()
 
 

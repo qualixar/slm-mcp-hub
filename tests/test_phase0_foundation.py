@@ -6,9 +6,6 @@ Tests for: config, storage, hub orchestrator, plugin discovery.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
-from pathlib import Path
 
 import pytest
 
@@ -26,7 +23,6 @@ from slm_mcp_hub.core.constants import DEFAULT_PORT, NAMESPACE_DELIMITER, VERSIO
 from slm_mcp_hub.core.hub import HubOrchestrator, HubState, get_hub, reset_hub
 from slm_mcp_hub.storage.database import HubDatabase
 from slm_mcp_hub.storage.schema import SCHEMA_VERSION
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

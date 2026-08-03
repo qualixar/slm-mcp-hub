@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 
 from slm_mcp_hub.core.config import MCPServerConfig
-from slm_mcp_hub.core.registry import CapabilityRegistry, RegisteredCapability
+from slm_mcp_hub.core.registry import CapabilityRegistry
 from slm_mcp_hub.federation.connection import ConnectionState, MCPConnection
 from slm_mcp_hub.federation.namespace import (
     make_unique_id,
@@ -21,7 +21,6 @@ from slm_mcp_hub.federation.namespace import (
     safe_server_id,
 )
 from slm_mcp_hub.federation.router import FederationRouter, RouteResult
-
 
 # ===========================================================================
 # Namespace Engine Tests

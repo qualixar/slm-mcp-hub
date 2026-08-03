@@ -1,331 +1,214 @@
-<p align="center">
-  <img src="assets/logo.png" alt="SLM MCP Hub" width="200"/>
-</p>
+# SLM MCP Hub
 
-<h1 align="center">SLM MCP Hub</h1>
-<p align="center"><strong>The World's First MCP Gateway That Learns</strong></p>
-<p align="center">One hub process. Every MCP server. Every AI client. Shared across sessions.<br/>Federated tool discovery with memory, learning, and cost intelligence.</p>
+[![PyPI](https://img.shields.io/pypi/v/slm-mcp-hub)](https://pypi.org/project/slm-mcp-hub/)
+[![npm](https://img.shields.io/npm/v/slm-mcp-hub)](https://www.npmjs.com/package/slm-mcp-hub)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 
-<p align="center">
-  <a href="https://pypi.org/project/slm-mcp-hub/"><img src="https://img.shields.io/pypi/v/slm-mcp-hub?style=for-the-badge&logo=pypi&logoColor=white" alt="PyPI"/></a>
-  <a href="https://www.npmjs.com/package/slm-mcp-hub"><img src="https://img.shields.io/npm/v/slm-mcp-hub?style=for-the-badge&logo=npm&logoColor=white" alt="npm"/></a>
-  <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPL_v3-blue.svg?style=for-the-badge" alt="AGPL v3"/></a>
-  <a href="https://qualixar.com"><img src="https://img.shields.io/badge/Qualixar-ff6b35?style=for-the-badge" alt="Qualixar"/></a>
-</p>
+SLM MCP Hub is a local-first gateway for Model Context Protocol servers. It
+connects stdio and HTTP MCP servers once, exposes them through one endpoint,
+and offers either direct transparent routing or a compact set of discovery and
+call tools.
 
----
+It is part of Qualixar's work on AI Reliability Engineering. The project is
+alpha software: test it with your own MCP clients and report reproducible
+failures through [GitHub Issues](https://github.com/qualixar/slm-mcp-hub/issues).
 
-## The Problem
+## What it does
 
-Every AI coding session spawns its own MCP server processes. Five Claude Code sessions with 36 MCPs means **180 OS processes eating ~9GB RAM**. Each session loads ~150K tokens of tool definitions into the context window. On a 200K-context model, 75% is gone before you type anything.
+- Federates stdio, Streamable HTTP, and SSE backends.
+- Serves clients over Streamable HTTP or stdio.
+- Supports transparent per-server proxy routes and compact federated routing.
+- Hot-adds, removes, modifies, reconnects, and reloads backend servers.
+- Preserves `${VAR}` secret placeholders when configuration is saved or
+  snapshotted; values are materialized only when a backend connection starts.
+- Connects directly to SuperLocalMemory and SLM Mesh when their plugins are
+  enabled. The SLM daemon remains a sibling service, not a server nested inside
+  the hub's federation graph.
+- Supports legacy stateful MCP clients, optional legacy stateless mode, and the
+  stateless core of MCP `2026-07-28` including `server/discover` and per-request
+  client metadata validation.
 
-And every session starts from zero. No shared cache. No cost tracking. No learning. No coordination between sessions.
+## Install
 
-## The Solution
-
-SLM MCP Hub runs all your MCPs in **one shared process**. Every AI client connects to one HTTP endpoint. The hub federates, caches, tracks costs, and — with SuperLocalMemory — **learns from every tool call**.
-
-| Metric | Without Hub | With Hub |
-|:-------|:-----------|:---------|
-| Processes (5 sessions, 36 MCPs) | **180** | **37** (79% reduction) |
-| RAM usage | ~9 GB | **~1.9 GB** |
-| Session startup | ~30s (spawn 36 processes) | **Instant** (HTTP connect) |
-| Tool definitions in context | 400+ tools (~150K tokens) | **3 meta-tools (~1K tokens)** |
-| Config management | Per-IDE, per-session | **One hub config** |
-| Learning across sessions | None | **Automatic** (with SLM plugin) |
-
----
-
-## How It Works
-
-### Federated Mode — 3 Tools Instead of 400+
-
-Instead of loading 400+ tool definitions into every session, Claude gets 3 meta-tools:
-
-| Meta-Tool | What It Does |
-|:----------|:-------------|
-| `hub__search_tools` | Search all tools by name or description. Returns full input schemas. |
-| `hub__call_tool` | Call any tool on any MCP server. Routes automatically. |
-| `hub__list_servers` | List all connected servers and their tool counts. |
-
-```
-You:     "Search GitHub for qualixar repos"
-Claude:  hub__search_tools(query="github search")
-Hub:     Found: github__search_repositories, github__search_code, ...
-
-Claude:  hub__call_tool(tool="github__search_repositories", arguments={"query": "qualixar"})
-Hub:     Routes to GitHub MCP → returns real results
-```
-
-**3 tool definitions instead of 400+. That's 150K tokens saved per session.**
-
----
-
-## Quick Start
+Python 3.11 or newer is required.
 
 ```bash
-# Install
 pip install slm-mcp-hub
+```
 
-# Initialize and import your MCPs
+The npm package installs the exact matching Python release into an isolated
+environment owned by the npm package:
+
+```bash
+npm install -g slm-mcp-hub
+```
+
+The npm and Python versions are release-locked. Installation fails instead of
+silently falling back to a different version or modifying an externally managed
+Python installation.
+
+## Quick start
+
+```bash
 slm-hub config init
+slm-hub setup detect
 slm-hub setup import ~/.claude.json
-
-# Start the hub
 slm-hub start
 ```
 
-### Connect Claude Code
+The default HTTP endpoint is `http://127.0.0.1:52414/mcp`.
 
-Add to `~/.claude.json`:
+For a native stdio connection:
 
 ```json
 {
   "mcpServers": {
-    "hub": {
-      "type": "http",
-      "url": "http://127.0.0.1:52414/mcp"
+    "slm-hub": {
+      "command": "slm-hub",
+      "args": ["mcp"]
     }
   }
 }
 ```
 
-Restart Claude Code. All tools available through `hub__search_tools` and `hub__call_tool`.
+## Routing modes
 
----
+Federated mode exposes three compact tools:
 
-## SLM Plugin — The Gateway That Learns
+- `search_tools` finds tools across connected servers.
+- `call_tool` invokes a namespaced tool returned by the search.
+- `list_servers` reports connected backends.
 
-When [SuperLocalMemory](https://superlocalmemory.com) is running, the hub **automatically** connects to it and learns from every tool call. No configuration needed.
+Transparent mode gives each backend a direct route:
 
-```
-SLM MCP Hub v0.1.0 running on http://127.0.0.1:52414/mcp
-  MCP servers: 37/37 connected
-  Tools: 345
-  Plugins: 2 (slm, mesh)         ← Auto-discovered
-  SLM: connected (mode=b, 4461 facts)
+```text
+http://127.0.0.1:52414/mcp/{server-name}
 ```
 
-### What the SLM Plugin Does
-
-| Hook | What Happens | SLM Endpoint |
-|:-----|:-------------|:-------------|
-| **Session start** | Recalls relevant context from past sessions | `POST /api/v3/recall/trace` |
-| **Every tool call** | Logs to SLM's learning pipeline — tool name, duration, success/failure | `POST /api/v3/tool-event` |
-| **Session end** | Persists session summary for future recall | `POST /api/v3/tool-event` (session_end type) |
-| **Warm-up prediction** | Predicts which MCPs you'll need based on recent history | Local ring buffer |
-
-### How It Works Under the Hood
-
-The SLM plugin communicates with the SLM daemon via its HTTP API at `localhost:8765`. No Python import of superlocalmemory required — pure HTTP integration. This means:
-
-- Hub works standalone when SLM is not installed (all hooks are no-ops)
-- Hub auto-discovers SLM daemon on startup
-- Same SLM daemon serves both the hub plugin AND direct Claude Code hooks
-- Every tool call routed through `hub__call_tool` triggers the learning pipeline
-
-### For End Users: SLM Through the Hub
-
-If you use SuperLocalMemory, you can put it inside the hub like any other MCP:
+Register either mode with a supported client:
 
 ```bash
-slm-hub setup import ~/.claude.json   # Imports all MCPs including SLM
-slm-hub start                          # SLM runs as a hub backend
+slm-hub setup register --client claude_code --mode federated
+slm-hub setup register --client claude_code --mode transparent
 ```
 
-The SLM plugin replaces the need for separate Claude Code hooks:
-- **`on_session_start`** replaces the `session_init` hook
-- **`on_tool_call_after`** replaces the `PostToolUse` hook
-- **`on_session_end`** replaces the `Stop` hook
-
-Zero manual hook configuration. The hub handles it.
-
----
-
-## Mesh Plugin — Cross-Session Coordination
-
-When the SLM daemon has mesh enabled, the hub registers as a mesh peer and coordinates across sessions:
-
-| Feature | What It Does |
-|:--------|:-------------|
-| **Peer registration** | Hub appears on the mesh as an `mcp-hub` agent type |
-| **Tool usage broadcast** | Other sessions see which tools are being used |
-| **Session notifications** | Mesh peers notified when sessions start/end |
-| **Tool list changes** | MCP connect/disconnect events broadcast to mesh |
-| **Distributed locking** | Prevent conflicts when multiple sessions access the same resource |
-
-The mesh plugin uses the SLM daemon's mesh HTTP API at `localhost:8765/mesh/*`. Like the SLM plugin, it auto-discovers and is a no-op when mesh is not available.
-
----
-
-## What Works Today (v0.1.0)
-
-| Feature | Status |
-|:--------|:-------|
-| Federation — All MCPs behind single endpoint | Working |
-| Federated Mode — 3 meta-tools, ~150K token savings | Working |
-| Transparent Proxy — `/mcp/{server}`, original tool names | Working |
-| SLM Plugin — Tool call learning, session recall, summaries | Working |
-| Mesh Plugin — Peer registration, broadcast, distributed locks | Working |
-| Intelligent Caching — SHA-256 content-hash, TTL, LRU | Working |
-| Cost Tracking — Per-tool costs, session budgets, cascade routing | Working |
-| Smart Tool Filtering — Project-type detection, frequency ranking | Working |
-| Multi-Client Auto-Setup — Claude Code, VS Code, Cursor, Windsurf, Codex CLI | Working |
-| Observability — Per-server metrics, request tracing, audit log | Working |
-| Lifecycle Management — Lazy startup, idle shutdown, always-on | Working |
-| Permission Model — Per-session role-based rules (ALLOW/DENY/WARN) | Working |
-| Resilience — Auto-restart (launchd/systemd), PID management | Working |
-| Network Discovery — mDNS/Zeroconf LAN discovery | Working |
-| Secrets — `~/.claude-secrets.env` loading, `${VAR}` resolution | Working |
-| HTTP + stdio + SSE transport | Working |
-
----
-
-## Architecture
-
-```
-                    ┌───────────────────────────────────────────────┐
-                    │             SLM MCP Hub                       │
-AI Client 1 ──┐    │                                               │    ┌── GitHub (26 tools)
-AI Client 2 ──┼────┤  Federation → Cache → Cost → Route ──────────┼────┤── Gemini (37 tools)
-AI Client 3 ──┘    │       ↕           ↕         ↕                │    ├── Context7 (2 tools)
-                    │   Permissions  Metrics   Learning            │    ├── SLM (32 tools)
-                    │       ↕                     ↕                │    ├── SQLite (8 tools)
-                    │  ┌─────────┐          ┌──────────┐           │    └── ...37+ more
-                    │  │   SLM   │          │   Mesh   │           │
-                    │  │ Plugin  │          │  Plugin  │           │
-                    │  └────┬────┘          └────┬─────┘           │
-                    └───────┼────────────────────┼─────────────────┘
-                            │                    │
-                            └────────┬───────────┘
-                                     ↓
-                           SLM Daemon (localhost:8765)
-                           Memory · Learning · Mesh
-```
-
-### Plugin Architecture
-
-Plugins are discovered automatically via Python entry_points on hub startup. Each plugin receives lifecycle hooks:
-
-```python
-class HubPlugin(ABC):
-    async def on_hub_start(self, hub) -> None: ...
-    async def on_hub_stop(self) -> None: ...
-    async def on_tool_call_after(self, session_id, server, tool, args, result, duration_ms, success) -> None: ...
-    async def on_session_start(self, session_id, client_info) -> None: ...
-    async def on_session_end(self, session_id) -> None: ...
-    async def on_mcp_connect(self, server_name) -> None: ...
-    async def on_mcp_disconnect(self, server_name) -> None: ...
-```
-
-Built-in plugins:
-
-| Plugin | Connection | What It Adds |
-|:-------|:-----------|:-------------|
-| `slm` | HTTP → `localhost:8765/api/v3/*` | Memory, learning, session recall, warm-up predictions |
-| `mesh` | HTTP → `localhost:8765/mesh/*` | Peer discovery, broadcast, distributed locks |
-
----
-
-## CLI Reference
-
-```bash
-slm-hub start [--port PORT] [--config PATH] [--log-level LEVEL]
-slm-hub status
-slm-hub config show | init | import <file>
-slm-hub setup detect | register | unregister | import
-slm-hub network discover | info
-```
+Use federated mode when context size matters. Use transparent mode when a
+client needs the backend's original tool surface.
 
 ## Configuration
 
-Hub config: `~/.slm-mcp-hub/config.json`
+The default file is `~/.slm-mcp-hub/config.json`. Override its directory with
+`SLM_HUB_CONFIG_DIR`.
 
-Environment overrides: `SLM_HUB_PORT`, `SLM_HUB_HOST`, `SLM_HUB_LOG_LEVEL`, `SLM_HUB_CONFIG_DIR`, `SLM_DAEMON_URL`.
+```json
+{
+  "host": "127.0.0.1",
+  "port": 52414,
+  "mcpServers": {
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+      }
+    },
+    "remote": {
+      "type": "http",
+      "url": "${REMOTE_MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${REMOTE_MCP_TOKEN}"
+      }
+    }
+  },
+  "plugins_enabled": ["slm", "mesh"]
+}
+```
 
-Secrets: `~/.claude-secrets.env` (shared with Claude Code). All `${VAR}` placeholders resolve on startup.
+Place secret values in the process environment or in
+`~/.slm-mcp-hub/secrets.env`. The hub persists the placeholders shown above,
+not their resolved values. If an older release already wrote a literal secret
+into `config.json` or `snapshots/`, rotate that credential and remove the
+contaminated copies manually; the hub cannot reliably reconstruct a lost
+environment-variable name.
 
----
+## SuperLocalMemory
 
-## Documentation
+Run SuperLocalMemory as its own daemon, then enable the direct hub plugins:
 
-| Guide | What You'll Learn |
-|:------|:-----------------|
-| [Getting Started](docs/GETTING-STARTED.md) | Install, import, connect, verify — 5 minutes |
-| [Architecture](docs/ARCHITECTURE.md) | Two modes, plugin system, tool call flow |
-| [Migration Guide](docs/MIGRATION-GUIDE.md) | Step-by-step from direct MCPs to hub, rollback |
-| [Configuration](docs/CONFIGURATION.md) | All settings, API endpoints, CLI reference |
+```bash
+export SLM_DAEMON_URL=http://127.0.0.1:8765
+export SLM_API_KEY='your-daemon-api-key'
+```
 
----
+`SLM_API_KEY` is sent as `X-SLM-API-Key` by both the memory and mesh plugins.
+Authentication failures disable the affected plugin and remain visible in
+logs without printing the key. Restart the hub after rotating the daemon key.
 
-## Part of the Qualixar Ecosystem
+Do not add the SLM daemon to `mcpServers` when using these plugins. That creates
+a misleading nested topology and is not the supported integration path.
 
-SLM MCP Hub is the **tool brain** — it manages, routes, and learns from MCP tool calls. It joins the Qualixar suite of AI agent reliability tools:
+## Stateless clients
 
-| Product | What It Does | Install |
-|:--------|:-------------|:--------|
-| **[SuperLocalMemory](https://superlocalmemory.com)** | Local-first AI agent memory — Fisher-Rao geometry, 5-channel retrieval, zero cloud | `npm install superlocalmemory` |
-| **[SLM Mesh](https://github.com/qualixar/slm-mesh)** | Peer-to-peer agent communication — real-time messaging, file locking, shared state | `npm install slm-mesh` |
-| **SLM MCP Hub** | Intelligent MCP gateway — federation, caching, cost tracking, learning (this repo) | `pip install slm-mcp-hub` |
-| **[Qualixar OS](https://qualixar.com/qualixar-os)** | Universal OS for AI agents — 12 topologies, Forge AI, 24-tab dashboard | `npx qualixar-os` |
-| **[AgentAssert](https://agentassert.com)** | Behavioral contracts for AI agents — ContractSpec DSL, drift detection |  `pip install agentassert-abc` |
-| **[AgentAssay](https://pypi.org/project/agentassay/)** | Token-efficient agent evaluation — 78-100% cost reduction, 10 adapters | `pip install agentassay` |
-| **[SkillFortify](https://pypi.org/project/skillfortify/)** | Agent skill security analysis — 100% precision, 22 frameworks, 3 citations | `pip install skillfortify` |
+Modern MCP `2026-07-28` HTTP requests are handled without a protocol session.
+They must send matching protocol versions in the `MCP-Protocol-Version` header
+and `params._meta`, plus per-request client information and capabilities.
 
-**Together:** SuperLocalMemory (memory brain) + SLM Mesh (connected brain) + SLM MCP Hub (tool brain) = **complete AI intelligence platform**. Each works standalone. Together: unstoppable.
+For older clients that cannot retain `Mcp-Session-Id`, enable compatibility
+mode:
 
----
+```bash
+export SLM_HUB_STATELESS=1
+slm-hub start
+```
 
-## Competitive Landscape
+Legacy stateful mode remains the default for older protocol versions. Optional
+restart recovery can re-adopt a client-supplied session identifier:
 
-| Tool | Stars | What It Does | What's Missing |
-|:-----|:------|:-------------|:---------------|
-| **mcp-hub** | 472 | HTTP federation | No memory, no cost tracking, no learning |
-| **Supergateway** | 2,573 | Stdio-to-SSE bridge | Broadcasts all responses to all clients |
-| **mcpmu** | 87 | Stdio multiplexer | Per-client process spawn, no sharing |
-| **mcp-proxy** | 249 | Stdio-to-HTTP | New process per session |
-| **SLM MCP Hub** | - | **Federation + memory + learning + cost + mesh** | **The only gateway that learns** |
+```bash
+export SLM_HUB_SESSION_RECOVERY=1
+```
 
----
+Recovery is off by default. At capacity, the hub refuses recovery rather than
+evicting an unrelated live session.
 
-## Author
+## Remote access security
 
-**Varun Pratap Bhardwaj** · [qualixar.com](https://qualixar.com) · [superlocalmemory.com](https://superlocalmemory.com) · [varunpratap.com](https://varunpratap.com)
+The default loopback bind is the safest deployment. A non-loopback host is
+refused unless `SLM_HUB_API_KEY` is set:
 
-7 research papers · 6 open source products · Building the AI Agent Reliability category.
+```bash
+export SLM_HUB_HOST=0.0.0.0
+export SLM_HUB_API_KEY='generate-a-long-random-value'
+slm-hub start
+```
+
+Clients must send either `X-SLM-Hub-API-Key` or
+`Authorization: Bearer <key>`. Authentication covers `/mcp`, transparent MCP
+routes, and management APIs; `/api/health` remains available for health checks.
+Use TLS at the network boundary whenever traffic leaves the host.
+
+## Development and verification
+
+```bash
+python -m venv .venv
+.venv/bin/pip install -e '.[dev]'
+.venv/bin/pytest --cov=slm_mcp_hub
+npm test
+```
+
+The release gate requires more than 95% Python line coverage, clean linting,
+wheel/sdist/npm package inspection, isolated install tests, dependency audits,
+and supported-Python CI.
+
+Architecture, configuration, migration, and getting-started details are in
+the [docs directory](docs/).
+
+## Contributing
+
+Reproduction tests are strongly preferred with bug reports. Pull requests must
+keep both distribution channels version-aligned and pass all release gates.
+See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 ## License
 
 AGPL-3.0-or-later. See [LICENSE](LICENSE).
-
-Commercial licensing: admin@qualixar.com
-
----
-
-## ⭐ Support This Project
-
-If this project solves a real problem for you, **please star the repo** — it helps other developers discover Qualixar and signals that the AI agent reliability community is growing. Every star matters.
-
-[![Star History Chart](https://api.star-history.com/svg?repos=qualixar/slm-mcp-hub&type=Date)](https://star-history.com/#qualixar/slm-mcp-hub&Date)
-
----
-
-## Part of the Qualixar AI Agent Reliability Platform
-
-Qualixar is building the open-source infrastructure for AI agent reliability engineering. Seven products, seven peer-reviewed papers, one coherent platform. Each tool solves one reliability pillar:
-
-| Product | Purpose | Install | Paper |
-|---------|---------|---------|-------|
-| **[SuperLocalMemory](https://github.com/qualixar/superlocalmemory)** | Persistent memory + learning for AI agents | `npx superlocalmemory` | [arXiv:2604.04514](https://arxiv.org/abs/2604.04514) |
-| **[Qualixar OS](https://github.com/qualixar/qualixar-os)** | Universal agent runtime (13 execution topologies) | `npx qualixar-os` | [arXiv:2604.06392](https://arxiv.org/abs/2604.06392) |
-| **[SLM Mesh](https://github.com/qualixar/slm-mesh)** | P2P coordination across AI agent sessions | `npm i slm-mesh` | — |
-| **[SLM MCP Hub](https://github.com/qualixar/slm-mcp-hub)** | Federate 430+ MCP tools through one gateway | `pip install slm-mcp-hub` | — |
-| **[AgentAssay](https://github.com/qualixar/agentassay)** | Token-efficient AI agent testing | `pip install agentassay` | [arXiv:2603.02601](https://arxiv.org/abs/2603.02601) |
-| **[AgentAssert](https://github.com/qualixar/agentassert-abc)** | Behavioral contracts + drift detection |  `pip install agentassert-abc` | [arXiv:2602.22302](https://arxiv.org/abs/2602.22302) |
-| **[SkillFortify](https://github.com/qualixar/skillfortify)** | Formal verification for AI agent skills | `pip install skillfortify` | [arXiv:2603.00195](https://arxiv.org/abs/2603.00195) |
-
-**Zero cloud dependency. Local-first. EU AI Act compliant.**
-
-Start here → **[qualixar.com](https://qualixar.com)** · [All papers on Qualixar HuggingFace](https://huggingface.co/Qualixar)
-
----

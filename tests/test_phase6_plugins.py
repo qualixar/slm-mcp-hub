@@ -23,11 +23,10 @@ from slm_mcp_hub.plugins.mesh_plugin import (
 )
 from slm_mcp_hub.plugins.slm_plugin import (
     RING_BUFFER_MAX,
-    SLMPlugin,
     SessionSummary,
+    SLMPlugin,
     ToolObservation,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

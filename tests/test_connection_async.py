@@ -452,8 +452,6 @@ class TestMCPConnectionStdioHandshake:
         mock_proc.wait = AsyncMock()
 
         # Mock _send_request and _send_notification to skip the real JSON-RPC wire
-        original_send_request = c._send_request
-
         call_count = 0
 
         async def mock_send_request(method, params):

@@ -1,0 +1,16 @@
+**/__pycache__/**
+**/*.py[cod]
+**/*.egg-info/**
+**/*.bak-*
+*.tgz
+.backup/
+.coverage*
+.git/
+.github/
+.pytest_cache/
+.ruff_cache/
+.slm-hub-venv/
+.venv/
+build/
+dist/
+node_modules/

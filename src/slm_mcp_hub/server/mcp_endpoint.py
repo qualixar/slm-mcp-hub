@@ -20,6 +20,13 @@ if TYPE_CHECKING:
     from slm_mcp_hub.core.hub import HubOrchestrator
 
 logger = logging.getLogger(__name__)
+MODERN_PROTOCOL_VERSION = "2026-07-28"
+LEGACY_PROTOCOL_VERSIONS = (
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+)
 
 # Keys that belong to the call_tool envelope itself rather than to the
 # arguments of the tool being invoked.
@@ -217,8 +224,14 @@ class MCPEndpoint:
         if session:
             logger.info("MCP client initialized: %s (session %s)", client_name, session_id[:8])
 
+        requested_version = params.get("protocolVersion")
+        negotiated_version = (
+            requested_version
+            if requested_version in LEGACY_PROTOCOL_VERSIONS
+            else LEGACY_PROTOCOL_VERSIONS[0]
+        )
         return {
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": negotiated_version,
             "capabilities": {
                 "tools": {"listChanged": True},
                 "resources": {"listChanged": True},
@@ -228,6 +241,27 @@ class MCPEndpoint:
                 "name": "slm-mcp-hub",
                 "version": VERSION,
             },
+        }
+
+    async def handle_server_discover(
+        self, session_id: str, params: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Advertise capabilities for stateless MCP 2026-07-28 clients."""
+        return {
+            "supportedVersions": [
+                MODERN_PROTOCOL_VERSION,
+                *LEGACY_PROTOCOL_VERSIONS,
+            ],
+            "capabilities": {
+                "tools": {"listChanged": True},
+                "resources": {"listChanged": True},
+                "prompts": {"listChanged": True},
+            },
+            "serverInfo": {"name": "slm-mcp-hub", "version": VERSION},
+            "instructions": (
+                "Use search_tools to discover federated tools, then call_tool "
+                "with the full namespaced tool name."
+            ),
         }
 
     async def handle_tools_list(self, session_id: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -556,6 +590,7 @@ class MCPEndpoint:
             return None
 
         handler_map = {
+            "server/discover": self.handle_server_discover,
             "initialize": self.handle_initialize,
             "tools/list": self.handle_tools_list,
             "tools/call": self.handle_tools_call,
@@ -597,7 +632,7 @@ class MCPEndpoint:
                 "error": {"code": -32602, "message": f"Invalid params: {exc}"},
             }
         except Exception as exc:
-            logger.error("Handler error for %s: %s", method, exc)
+            logger.error("Handler error for %s (%s)", method, type(exc).__name__)
             return {
                 "jsonrpc": "2.0",
                 "id": msg_id,

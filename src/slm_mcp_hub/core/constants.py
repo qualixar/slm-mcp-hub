@@ -6,20 +6,44 @@ import os
 from pathlib import Path
 
 # Version
-VERSION = "0.2.5"
+VERSION = "0.2.6"
+
+
+def get_config_dir() -> Path:
+    """Resolve the active config directory at the point of use."""
+    return Path(os.environ.get("SLM_HUB_CONFIG_DIR", Path.home() / ".slm-mcp-hub"))
+
+
+def get_config_file(config_dir: Path | None = None) -> Path:
+    return (config_dir or get_config_dir()) / "config.json"
+
+
+def get_database_file(config_dir: Path | None = None) -> Path:
+    return (config_dir or get_config_dir()) / "hub.db"
+
+
+def get_pid_file(config_dir: Path | None = None) -> Path:
+    return (config_dir or get_config_dir()) / "hub.pid"
+
+
+def get_log_file(config_dir: Path | None = None) -> Path:
+    return (config_dir or get_config_dir()) / "hub.log"
+
+
+def get_permissions_file(config_dir: Path | None = None) -> Path:
+    return (config_dir or get_config_dir()) / "permissions.json"
+
+
+def get_fallback_config_file(config_dir: Path | None = None) -> Path:
+    return (config_dir or get_config_dir()) / "fallback-config.json"
+
+
+def get_snapshots_dir(config_dir: Path | None = None) -> Path:
+    return (config_dir or get_config_dir()) / "snapshots"
 
 # Network
 DEFAULT_PORT = 52414
 DEFAULT_HOST = "127.0.0.1"
-
-# Paths
-CONFIG_DIR = Path(os.environ.get("SLM_HUB_CONFIG_DIR", Path.home() / ".slm-mcp-hub"))
-CONFIG_FILE = CONFIG_DIR / "config.json"
-DATABASE_FILE = CONFIG_DIR / "hub.db"
-PID_FILE = CONFIG_DIR / "hub.pid"
-LOG_FILE = CONFIG_DIR / "hub.log"
-PERMISSIONS_FILE = CONFIG_DIR / "permissions.json"
-FALLBACK_CONFIG_FILE = CONFIG_DIR / "fallback-config.json"
 
 # Federation
 NAMESPACE_DELIMITER = "__"

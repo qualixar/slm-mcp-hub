@@ -8,9 +8,8 @@ from pathlib import Path
 
 import click
 
-from slm_mcp_hub.core.constants import DEFAULT_PORT
 from slm_mcp_hub.discovery.auto_register import AutoRegister, RegistrationPlan
-from slm_mcp_hub.discovery.client_detector import ClientDetector
+from slm_mcp_hub.discovery.client_detector import ClientDetector, DetectedClient
 from slm_mcp_hub.discovery.network import (
     SERVICE_TYPE,
     NetworkDiscovery,

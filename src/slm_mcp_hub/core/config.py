@@ -14,13 +14,14 @@ from typing import Any
 from slm_mcp_hub.core.constants import (
     CACHE_DEFAULT_TTL_SECONDS,
     CACHE_MAX_ENTRIES,
-    CONFIG_DIR,
-    CONFIG_FILE,
     DEFAULT_HOST,
     DEFAULT_PORT,
     IDLE_SHUTDOWN_SECONDS,
     MAX_SESSIONS,
     SESSION_TIMEOUT_SECONDS,
+    get_config_dir,
+    get_config_file,
+    get_snapshots_dir,
 )
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ class HubConfig:
 
     host: str = DEFAULT_HOST
     port: int = DEFAULT_PORT
-    config_dir: Path = CONFIG_DIR
+    config_dir: Path = field(default_factory=get_config_dir)
     mcp_servers: tuple[MCPServerConfig, ...] = ()
     session_timeout_seconds: int = SESSION_TIMEOUT_SECONDS
     max_sessions: int = MAX_SESSIONS
@@ -174,7 +175,7 @@ def parse_mcp_server(name: str, raw: dict[str, Any]) -> MCPServerConfig:
 
 def load_config(config_path: Path | None = None) -> HubConfig:
     """Load hub configuration from file, with env var overrides."""
-    path = config_path or CONFIG_FILE
+    path = config_path or get_config_file()
 
     if not path.exists():
         logger.info("No config file found at %s, using defaults", path)
@@ -191,7 +192,7 @@ def load_config(config_path: Path | None = None) -> HubConfig:
     config = HubConfig(
         host=raw.get("host", DEFAULT_HOST),
         port=raw.get("port", DEFAULT_PORT),
-        config_dir=Path(raw.get("config_dir", str(CONFIG_DIR))),
+        config_dir=Path(raw.get("config_dir", str(get_config_dir()))),
         mcp_servers=servers,
         session_timeout_seconds=raw.get("session_timeout_seconds", SESSION_TIMEOUT_SECONDS),
         max_sessions=raw.get("max_sessions", MAX_SESSIONS),
@@ -199,7 +200,9 @@ def load_config(config_path: Path | None = None) -> HubConfig:
         cache_max_entries=raw.get("cache_max_entries", CACHE_MAX_ENTRIES),
         idle_shutdown_seconds=raw.get("idle_shutdown_seconds", IDLE_SHUTDOWN_SECONDS),
         log_level=raw.get("log_level", "INFO"),
-        cors_origins=tuple(raw.get("cors_origins", ["*"])),
+        cors_origins=tuple(
+            raw.get("cors_origins", ["http://127.0.0.1", "http://localhost"])
+        ),
         plugins_enabled=tuple(raw.get("plugins_enabled", [])),
     )
 
@@ -211,14 +214,20 @@ def _apply_env_overrides(config: HubConfig) -> HubConfig:
     port = int(os.environ.get("SLM_HUB_PORT", config.port))
     host = os.environ.get("SLM_HUB_HOST", config.host)
     log_level = os.environ.get("SLM_HUB_LOG_LEVEL", config.log_level)
+    config_dir = Path(os.environ.get("SLM_HUB_CONFIG_DIR", str(config.config_dir)))
 
-    if port == config.port and host == config.host and log_level == config.log_level:
+    if (
+        port == config.port
+        and host == config.host
+        and log_level == config.log_level
+        and config_dir == config.config_dir
+    ):
         return config
 
     return HubConfig(
         host=host,
         port=port,
-        config_dir=config.config_dir,
+        config_dir=config_dir,
         mcp_servers=config.mcp_servers,
         session_timeout_seconds=config.session_timeout_seconds,
         max_sessions=config.max_sessions,
@@ -249,7 +258,6 @@ def import_vscode_config(vscode_json_path: Path) -> list[MCPServerConfig]:
     return [parse_mcp_server(name, cfg) for name, cfg in servers_raw.items()]
 
 
-SNAPSHOTS_DIR = CONFIG_DIR / "snapshots"
 MAX_SNAPSHOTS = 50
 DROP_GUARD_THRESHOLD = 0.7  # refuse save if MCP count drops below 70% of current
 
@@ -275,16 +283,17 @@ def _snapshot_existing(path: Path) -> Path | None:
     except (json.JSONDecodeError, OSError):
         return None  # corrupt file, can't snapshot meaningfully
 
-    SNAPSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    snapshots_dir = get_snapshots_dir(path.parent)
+    snapshots_dir.mkdir(parents=True, exist_ok=True)
     import time
     ts = time.strftime("%Y%m%d-%H%M%S")
-    snap_path = SNAPSHOTS_DIR / f"config-{ts}-{existing_count}mcps.json"
+    snap_path = snapshots_dir / f"config-{ts}-{existing_count}mcps.json"
 
     import shutil
     shutil.copy2(path, snap_path)
 
     # Prune old snapshots — keep MAX_SNAPSHOTS newest
-    snaps = sorted(SNAPSHOTS_DIR.glob("config-*.json"))
+    snaps = sorted(snapshots_dir.glob("config-*.json"))
     while len(snaps) > MAX_SNAPSHOTS:
         snaps[0].unlink(missing_ok=True)
         snaps = snaps[1:]
@@ -329,14 +338,14 @@ def save_config(config: HubConfig, config_path: Path | None = None, force: bool 
     4. ATOMIC WRITE — write to .tmp, validate, rename.
     """
     import os
-    path = config_path or CONFIG_FILE
+    path = config_path or get_config_file(config.config_dir)
 
     if "PYTEST_CURRENT_TEST" in os.environ:
         real_user_config = (Path.home() / ".slm-mcp-hub" / "config.json").resolve()
         if path.resolve() == real_user_config:
             raise RuntimeError(
                 f"REFUSING to overwrite real user config {path} during pytest. "
-                "Tests must monkeypatch CONFIG_FILE or pass an explicit config_path. "
+                "Tests must pass an explicit config_path. "
                 "This guard prevents the April 26 incident where tests "
                 "nuked 39 MCP server configurations."
             )
@@ -353,7 +362,7 @@ def save_config(config: HubConfig, config_path: Path | None = None, force: bool 
                     f"REFUSING to save: MCP count would drop from {existing_count} to {new_count} "
                     f"(>{int((1-DROP_GUARD_THRESHOLD)*100)}% loss). "
                     f"Pass force=True or use 'slm-hub config restore' if this is unintended. "
-                    f"Snapshots: {SNAPSHOTS_DIR}"
+                    f"Snapshots: {get_snapshots_dir(path.parent)}"
                 )
         except (json.JSONDecodeError, OSError):
             pass  # corrupt existing file — let save proceed
@@ -407,10 +416,11 @@ def save_config(config: HubConfig, config_path: Path | None = None, force: bool 
 
 def list_snapshots() -> list[dict[str, Any]]:
     """List all config snapshots, newest first."""
-    if not SNAPSHOTS_DIR.exists():
+    snapshots_dir = get_snapshots_dir()
+    if not snapshots_dir.exists():
         return []
     out = []
-    for snap in sorted(SNAPSHOTS_DIR.glob("config-*.json"), reverse=True):
+    for snap in sorted(snapshots_dir.glob("config-*.json"), reverse=True):
         try:
             with open(snap) as f:
                 d = json.load(f)
@@ -428,11 +438,11 @@ def list_snapshots() -> list[dict[str, Any]]:
 
 def restore_snapshot(snapshot_name: str, target: Path | None = None) -> Path:
     """Restore a snapshot to the live config path. Returns the restored path."""
-    snap = SNAPSHOTS_DIR / snapshot_name
+    snap = get_snapshots_dir() / snapshot_name
     if not snap.exists():
         raise FileNotFoundError(f"Snapshot not found: {snap}")
 
-    target = target or CONFIG_FILE
+    target = target or get_config_file()
 
     # Snapshot the current state before restoring (so restore is reversible)
     _snapshot_existing(target)

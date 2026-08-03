@@ -1,165 +1,114 @@
-# Configuration Reference
+# Configuration
 
-## Hub Config File
+The hub reads `~/.slm-mcp-hub/config.json`. Set `SLM_HUB_CONFIG_DIR` to move
+the complete runtime directory, including configuration, database, PID, log,
+and snapshots.
 
-Location: `~/.slm-mcp-hub/config.json`
-
-Override with: `SLM_HUB_CONFIG_DIR` environment variable
-
-### Full Example
+## Example
 
 ```json
 {
   "host": "127.0.0.1",
   "port": 52414,
-  "log_level": "INFO",
   "session_timeout_seconds": 3600,
   "max_sessions": 50,
   "cache_ttl_seconds": 300,
   "cache_max_entries": 1000,
   "idle_shutdown_seconds": 1800,
+  "log_level": "INFO",
   "cors_origins": ["http://127.0.0.1", "http://localhost"],
-  "plugins_enabled": [],  // v0.2.0: SLM + Mesh plugins (not yet available)
+  "plugins_enabled": ["slm", "mesh"],
   "mcpServers": {
-    "context7": {
+    "local": {
       "command": "npx",
-      "args": ["-y", "@upstash/context7-mcp"],
+      "args": ["-y", "@modelcontextprotocol/server-example"],
+      "env": {"TOKEN": "${LOCAL_MCP_TOKEN}"},
       "enabled": true
     },
-    "github": {
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}"
-      }
-    },
-    "gemini": {
+    "remote": {
       "type": "http",
-      "url": "http://localhost:3001/mcp",
-      "headers": {
-        "X-Api-Key": "${GEMINI_API_KEY}"
-      }
-    },
-    "tavily": {
-      "type": "http",
-      "url": "https://mcp.tavily.com/mcp/?tavilyApiKey=${TAVILY_API_KEY}"
+      "url": "${REMOTE_MCP_URL}",
+      "headers": {"Authorization": "Bearer ${REMOTE_MCP_TOKEN}"},
+      "enabled": true
     }
   }
 }
 ```
 
-### Settings
+JSON comments are not supported.
 
-| Setting | Default | Description |
-|:--------|:--------|:------------|
-| `host` | `127.0.0.1` | Listen address. Use `0.0.0.0` for network access. |
-| `port` | `52414` | Listen port |
-| `log_level` | `INFO` | Logging level: DEBUG, INFO, WARNING, ERROR |
-| `session_timeout_seconds` | `3600` | Session auto-expiry (1 hour) |
-| `max_sessions` | `50` | Maximum concurrent client sessions |
-| `cache_ttl_seconds` | `300` | Default cache TTL (5 minutes) |
-| `cache_max_entries` | `1000` | Maximum cached results |
-| `idle_shutdown_seconds` | `1800` | Idle MCP shutdown timeout (30 minutes) |
-| `cors_origins` | `["http://127.0.0.1", "http://localhost"]` | Allowed CORS origins |
-| `plugins_enabled` | `[]` | Plugin filter. Empty = all discovered plugins. |
+## Server fields
 
-### Environment Variable Overrides
+| Field | Meaning |
+|---|---|
+| `command` | Executable for a stdio server. |
+| `args` | Argument array for a stdio server. |
+| `env` | Environment passed to a stdio server. |
+| `type` | `stdio`, `http`, or `sse`. Inferred when omitted. |
+| `url` | Endpoint for an HTTP or SSE server. |
+| `headers` | Request headers for an HTTP or SSE server. |
+| `enabled` | Whether the server may connect. |
+| `always_on` | Prevents idle shutdown. |
+| `no_cache` | Disables hub caching for the server. |
+| `cost_per_call_cents` | Optional accounting value. |
 
-| Variable | Overrides |
-|:---------|:----------|
-| `SLM_HUB_PORT` | `port` |
-| `SLM_HUB_HOST` | `host` |
-| `SLM_HUB_LOG_LEVEL` | `log_level` |
-| `SLM_HUB_CONFIG_DIR` | Config directory path |
+## Secret placeholders
 
-### MCP Server Entry Format
+`${VAR}` and `${env:VAR}` are resolved only when a backend connection is
+created. Saving, modifying, importing, or snapshotting the config preserves the
+literal placeholder.
 
-#### Stdio Transport (command-based)
+The CLI loads secrets from these files when present:
 
-```json
-{
-  "server-name": {
-    "command": "npx",
-    "args": ["-y", "package-name"],
-    "env": {
-      "API_KEY": "${API_KEY}"
-    },
-    "enabled": true,
-    "always_on": false,
-    "no_cache": false,
-    "cost_per_call_cents": 0.0
-  }
-}
-```
+1. `~/.slm-mcp-hub/secrets.env`
+2. `~/.claude-secrets.env`
 
-#### HTTP Transport (URL-based)
+An existing literal secret cannot be safely converted back into a placeholder
+because its original variable name is unknown. Rotate secrets exposed by older
+versions and remove contaminated config and snapshot copies manually.
 
-```json
-{
-  "server-name": {
-    "type": "http",
-    "url": "https://example.com/mcp",
-    "headers": {
-      "Authorization": "Bearer ${TOKEN}"
-    },
-    "enabled": true
-  }
-}
-```
+## SuperLocalMemory plugin settings
 
-### Secret Resolution
+SuperLocalMemory is a direct sibling service. Do not list it as a federated
+backend when using the built-in plugins.
 
-MCP configs support `${VAR}` and `${env:VAR}` placeholders. The hub resolves these from:
+| Variable | Purpose |
+|---|---|
+| `SLM_DAEMON_URL` | Daemon base URL; defaults to `http://127.0.0.1:8765`. |
+| `SLM_API_KEY` | Sent as `X-SLM-API-Key` by both SLM plugins. |
 
-1. `~/.claude-secrets.env` (shared with Claude Code)
-2. `~/.slm-mcp-hub/secrets.env` (hub-specific)
-3. OS environment variables
+Restart the hub after changing either value.
 
-Example `.claude-secrets.env`:
-```
-GITHUB_PERSONAL_ACCESS_TOKEN=ghp_xxxxxxxxxxxx
-GEMINI_API_KEY=AIzaSyxxxxxxxxxx
-TAVILY_API_KEY=tvly-xxxxxxxxxx
-```
+## Hub environment variables
 
-## API Endpoints
+| Variable | Purpose |
+|---|---|
+| `SLM_HUB_CONFIG_DIR` | Runtime/config directory. |
+| `SLM_HUB_HOST` | HTTP bind host. |
+| `SLM_HUB_PORT` | HTTP bind port. |
+| `SLM_HUB_LOG_LEVEL` | Logging level. |
+| `SLM_HUB_API_KEY` | Required for non-loopback binds; authenticates MCP and management routes. |
+| `SLM_HUB_STATELESS` | Set to `1` for legacy clients that cannot retain session IDs. |
+| `SLM_HUB_SESSION_RECOVERY` | Set to `1` to re-adopt a legacy session ID after restart. |
 
-### Hub Management
+Modern MCP `2026-07-28` requests are sessionless independently of
+`SLM_HUB_STATELESS`.
 
-| Endpoint | Method | Description |
-|:---------|:-------|:------------|
-| `/api/health` | GET | Health check (version, state, uptime) |
-| `/api/status` | GET | Detailed hub + session status |
-| `/api/sessions` | GET | List active sessions |
-| `/api/sessions/{id}` | DELETE | Destroy a session |
-| `/api/servers` | GET | List all backend MCP servers |
+## Remote binding
 
-### MCP Protocol
+The hub refuses a non-loopback bind unless `SLM_HUB_API_KEY` is set. Clients
+send the value in `X-SLM-Hub-API-Key` or `Authorization: Bearer <key>`. Use TLS
+outside the host and restrict ingress at the network boundary.
 
-| Endpoint | Method | Description |
-|:---------|:-------|:------------|
-| `/mcp` | POST | Federated MCP endpoint (all tools) |
-| `/mcp/{server}` | POST | Transparent proxy for specific server |
-
-## CLI Reference
+## Safe changes and recovery
 
 ```bash
-# Hub lifecycle
-slm-hub start [--port PORT] [--config PATH] [--log-level LEVEL]
-slm-hub status
-
-# Configuration
-slm-hub config init
-slm-hub config show
-slm-hub config import <file> [--format auto|claude|vscode]
-
-# Client setup
-slm-hub setup detect [--json-output]
-slm-hub setup register --all|--client NAME [--mode transparent|federated] [--dry-run]
-slm-hub setup unregister --all|--client NAME
-slm-hub setup import <file> [--format auto|claude|vscode]
-
-# Network
-slm-hub network discover [--timeout SECONDS] [--json-output]
-slm-hub network info
+slm-hub server add example --command npx --arg -y --arg package-name
+slm-hub server modify example --env TOKEN='${EXAMPLE_TOKEN}'
+slm-hub server reload
+slm-hub config snapshots
+slm-hub config restore <snapshot-name>
 ```
+
+Writes are atomic. Existing non-trivial configs are snapshotted, and a
+large unexpected server-count drop is refused unless explicitly forced.

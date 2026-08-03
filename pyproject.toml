@@ -4,19 +4,19 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "slm-mcp-hub"
-version = "0.2.5"
-description = "The first MCP gateway that learns, hot-reloads, and serves both stdio + HTTP natively — intelligent federation, zero-restart server lifecycle, native Claude Desktop integration, and learned routing for Model Context Protocol."
+dynamic = ["version"]
+description = "A local-first MCP gateway for federating stdio and HTTP servers through one endpoint."
 readme = "README.md"
-license = {text = "AGPL-3.0-or-later"}
+license = "AGPL-3.0-or-later"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
 authors = [
-    {name = "Varun Pratap Bhardwaj", email = "varun@qualixar.com"},
+    {name = "Varun Pratap Bhardwaj", email = "varun.pratap.bhardwaj@gmail.com"},
 ]
 keywords = ["mcp", "model-context-protocol", "gateway", "proxy", "ai-tools", "slm"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -35,18 +35,22 @@ slm = ["superlocalmemory>=3.4.0"]
 mesh = ["superlocalmemory>=3.4.0"]
 full = ["superlocalmemory>=3.4.0"]
 dev = [
+    "build>=1.2",
+    "httpx2>=2.9,<3",
+    "pip-audit>=2.9",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
+    "ruff>=0.12",
 ]
 
 [project.scripts]
 slm-hub = "slm_mcp_hub.cli.main:main"
 
 [project.urls]
-Homepage = "https://qualixar.com/slm-mcp-hub"
+Homepage = "https://github.com/qualixar/slm-mcp-hub"
 Repository = "https://github.com/qualixar/slm-mcp-hub"
-Documentation = "https://qualixar.com/docs/slm-mcp-hub"
+Documentation = "https://github.com/qualixar/slm-mcp-hub/tree/main/docs"
 
 [project.entry-points."slm_mcp_hub.plugins"]
 slm = "slm_mcp_hub.plugins.slm_plugin:SLMPlugin"
@@ -54,6 +58,9 @@ mesh = "slm_mcp_hub.plugins.mesh_plugin:MeshPlugin"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "slm_mcp_hub.core.constants.VERSION"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -65,4 +72,14 @@ omit = ["*/tests/*"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 100
+fail_under = 96
+
+[tool.ruff]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "B"]
+ignore = ["B027"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = []

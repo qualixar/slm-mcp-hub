@@ -13,10 +13,8 @@ Coverage:
 
 from __future__ import annotations
 
-import asyncio
 import json
 import platform
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -30,7 +28,6 @@ from slm_mcp_hub.discovery.client_detector import (
     _build_known_clients,
 )
 from slm_mcp_hub.federation.manager import ConnectionManager
-
 
 # ---------- client_detector: Claude Desktop ----------
 
@@ -266,6 +263,7 @@ class TestStatusVerbose:
     def test_status_verbose_help_lists_flag(self):
         """The --verbose flag is documented in status --help."""
         from click.testing import CliRunner
+
         from slm_mcp_hub.cli.main import cli
         runner = CliRunner()
         result = runner.invoke(cli, ["status", "--help"])

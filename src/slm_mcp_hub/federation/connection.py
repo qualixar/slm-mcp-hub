@@ -12,7 +12,10 @@ from enum import Enum
 from typing import Any
 
 from slm_mcp_hub.core.config import MCPServerConfig, materialize_server_config
-from slm_mcp_hub.core.constants import DEFAULT_TOOL_TIMEOUT_S, MCP_REQUEST_TIMEOUT_MS, VERSION
+from slm_mcp_hub.core.constants import (
+    MCP_REQUEST_TIMEOUT_MS,
+    VERSION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -234,12 +237,12 @@ class MCPConnection:
                 env=env,
                 limit=10 * 1024 * 1024,  # 10MB readline buffer for large MCP responses
             )
-        except FileNotFoundError:
+        except FileNotFoundError as exc:
             self._state = ConnectionState.ERROR
-            raise ConnectionError(f"Command not found: {cmd}")
+            raise ConnectionError(f"Command not found: {cmd}") from exc
         except OSError as exc:
             self._state = ConnectionState.ERROR
-            raise ConnectionError(f"Failed to start MCP {self.name}: {exc}")
+            raise ConnectionError(f"Failed to start MCP {self.name}: {exc}") from exc
 
         # Start reading stdout (JSON-RPC responses)
         self._reader_task = asyncio.create_task(self._read_stdout())
@@ -277,17 +280,17 @@ class MCPConnection:
         except Exception as exc:
             self._state = ConnectionState.ERROR
             await self.disconnect()
-            raise ConnectionError(f"MCP {self.name} initialization failed: {exc}")
+            raise ConnectionError(f"MCP {self.name} initialization failed: {exc}") from exc
 
     async def _connect_http(self) -> None:
         """Connect to a remote HTTP MCP server via Streamable HTTP."""
         try:
             import httpx
-        except ImportError:
+        except ImportError as exc:
             self._state = ConnectionState.ERROR
             raise ConnectionError(
-                f"httpx required for HTTP transport. Install with: pip install httpx"
-            )
+                "httpx required for HTTP transport. Install with: pip install httpx"
+            ) from exc
 
         runtime_config = materialize_server_config(self._config)
         self._http_url = runtime_config.url
@@ -438,9 +441,9 @@ class MCPConnection:
         try:
             effective_timeout = timeout_s if timeout_s is not None else (MCP_REQUEST_TIMEOUT_MS / 1000)
             result = await asyncio.wait_for(future, timeout=effective_timeout)
-        except asyncio.TimeoutError:
+        except asyncio.TimeoutError as exc:
             self._pending.pop(req_id, None)
-            raise TimeoutError(f"MCP {self.name} request {method} timed out")
+            raise TimeoutError(f"MCP {self.name} request {method} timed out") from exc
         finally:
             self._in_flight -= 1
             if self._in_flight == 0 and self._drain_event is not None:

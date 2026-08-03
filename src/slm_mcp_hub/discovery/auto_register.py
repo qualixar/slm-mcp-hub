@@ -11,9 +11,8 @@ from pathlib import Path
 from typing import Any
 
 from slm_mcp_hub.core.config import (
-    MCPServerConfig,
-    parse_mcp_server,
     load_config,
+    parse_mcp_server,
     save_config,
 )
 from slm_mcp_hub.core.constants import DEFAULT_PORT

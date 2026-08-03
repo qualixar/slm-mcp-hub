@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 
+from slm_mcp_hub.core.constants import VERSION
 from slm_mcp_hub.plugins.base import HubPlugin
 from slm_mcp_hub.plugins.slm_http import (
     create_slm_http_client,
@@ -94,7 +95,7 @@ class SLMPlugin(HubPlugin):
 
     @property
     def version(self) -> str:
-        return "0.1.2"
+        return VERSION
 
     @property
     def available(self) -> bool:
@@ -224,14 +225,6 @@ class SLMPlugin(HubPlugin):
         total_duration = self._session_durations.pop(session_id, 0)
         ctx = self._session_contexts.pop(session_id, {})
         total_calls = sum(tool_counts.values())
-
-        summary = SessionSummary(
-            session_id=session_id,
-            tool_counts=tool_counts,
-            total_duration_ms=total_duration,
-            total_calls=total_calls,
-            project_path=ctx.get("project_path"),
-        )
 
         if not self._available or not self._client:
             return

@@ -1,7 +1,7 @@
 {
   "name": "slm-mcp-hub",
-  "version": "0.2.5",
-  "description": "The first MCP gateway that learns, hot-reloads, and serves both stdio + HTTP natively. Zero-restart server lifecycle, native Claude Desktop integration, intelligent federation, and learned routing for Model Context Protocol.",
+  "version": "0.2.6",
+  "description": "A local-first MCP gateway for federating stdio and HTTP servers through one endpoint.",
   "keywords": [
     "mcp",
     "model-context-protocol",
@@ -19,7 +19,7 @@
   ],
   "author": {
     "name": "Varun Pratap Bhardwaj",
-    "email": "varun@qualixar.com",
+    "email": "varun.pratap.bhardwaj@gmail.com",
     "url": "https://varunpratap.com"
   },
   "license": "AGPL-3.0-or-later",
@@ -27,7 +27,7 @@
     "type": "git",
     "url": "https://github.com/qualixar/slm-mcp-hub.git"
   },
-  "homepage": "https://qualixar.com/slm-mcp-hub",
+  "homepage": "https://github.com/qualixar/slm-mcp-hub",
   "bugs": {
     "url": "https://github.com/qualixar/slm-mcp-hub/issues"
   },
@@ -36,11 +36,11 @@
   },
   "scripts": {
     "postinstall": "node scripts/postinstall.js",
-    "test": "echo \"Run: slm-hub status\" && exit 0"
+    "test": "node --test tests-js/*.test.js"
   },
   "engines": {
-    "node": ">=14.0.0",
-    "npm": ">=6.0.0"
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
   },
   "os": [
     "darwin",
@@ -50,13 +50,11 @@
   "files": [
     "bin/",
     "scripts/",
-    "src/",
-    "docs/",
+    "tests-js/",
     "README.md",
     "LICENSE",
     "NOTICE",
-    "CHANGELOG.md",
-    "pyproject.toml"
+    "CHANGELOG.md"
   ],
   "preferGlobal": true,
   "funding": {
@@ -66,7 +64,7 @@
   "maintainers": [
     {
       "name": "Varun Pratap Bhardwaj",
-      "email": "varun@qualixar.com",
+      "email": "varun.pratap.bhardwaj@gmail.com",
       "url": "https://github.com/varun369"
     }
   ]

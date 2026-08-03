@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import time
 from pathlib import Path
@@ -10,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from slm_mcp_hub.observability.metrics import MetricsCollector, ServerMetrics
-from slm_mcp_hub.observability.tracer import RequestTracer, TraceSpan
+from slm_mcp_hub.observability.tracer import RequestTracer
 from slm_mcp_hub.resilience.watchdog import (
     generate_launchd_plist,
     generate_systemd_unit,
@@ -27,7 +26,6 @@ from slm_mcp_hub.security.permissions import (
     PermissionRule,
 )
 from slm_mcp_hub.storage.database import HubDatabase
-
 
 # ===========================================================================
 # Permission Engine Tests
@@ -260,7 +258,7 @@ class TestWatchdog:
 
     def test_pid_file_lifecycle(self, tmp_path, monkeypatch):
         pid_path = tmp_path / "test.pid"
-        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.PID_FILE", pid_path)
+        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.get_pid_file", lambda: pid_path)
         write_pid_file()
         assert pid_path.exists()
         pid = read_pid_file()
@@ -269,34 +267,34 @@ class TestWatchdog:
         assert not pid_path.exists()
 
     def test_read_pid_file_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.PID_FILE", tmp_path / "nope.pid")
+        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.get_pid_file", lambda: tmp_path / "nope.pid")
         assert read_pid_file() is None
 
     def test_read_pid_file_invalid(self, tmp_path, monkeypatch):
         pid_path = tmp_path / "bad.pid"
         pid_path.write_text("not_a_number")
-        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.PID_FILE", pid_path)
+        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.get_pid_file", lambda: pid_path)
         assert read_pid_file() is None
 
     def test_is_running_no_pid(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.PID_FILE", tmp_path / "nope.pid")
+        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.get_pid_file", lambda: tmp_path / "nope.pid")
         assert is_running() is False
 
     def test_is_running_current_process(self, tmp_path, monkeypatch):
         pid_path = tmp_path / "test.pid"
         pid_path.write_text(str(os.getpid()))
-        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.PID_FILE", pid_path)
+        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.get_pid_file", lambda: pid_path)
         assert is_running() is True
 
     def test_is_running_stale_pid(self, tmp_path, monkeypatch):
         pid_path = tmp_path / "test.pid"
         pid_path.write_text("999999999")  # Very unlikely to exist
-        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.PID_FILE", pid_path)
+        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.get_pid_file", lambda: pid_path)
         assert is_running() is False
         assert not pid_path.exists()  # Stale PID cleaned up
 
     def test_remove_pid_file_missing(self, tmp_path, monkeypatch):
-        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.PID_FILE", tmp_path / "nope.pid")
+        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.get_pid_file", lambda: tmp_path / "nope.pid")
         remove_pid_file()  # No error
 
     def test_install_launchd(self, tmp_path, monkeypatch):
