@@ -254,7 +254,7 @@ def create_app(
             except ReloadError as exc:
                 return {"success": False, "error": str(exc)}
             except Exception as exc:
-                logger.exception("Reload crashed")
-                return {"success": False, "error": str(exc)}
+                logger.error("Reload crashed (%s)", type(exc).__name__)
+                return {"success": False, "error": "Reload failed unexpectedly"}
 
     return app

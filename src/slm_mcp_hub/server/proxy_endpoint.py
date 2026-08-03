@@ -39,20 +39,29 @@ class ProxyEndpoint:
     async def handle_jsonrpc(
         self,
         server_name: str,
-        message: dict[str, Any],
+        message: object,
     ) -> dict[str, Any] | None:
         """Handle a JSON-RPC message for a specific backend server.
 
         Routes to the backend connection and returns the response
         UNMODIFIED — original tool names, original capabilities.
         """
-        method = message.get("method", "")
-        params = message.get("params", {})
+        if not isinstance(message, dict):
+            return _error_response(None, -32600, "Invalid Request")
+
         msg_id = message.get("id")
 
         # Notifications (no id)
         if msg_id is None:
             return None
+
+        method = message.get("method", "")
+        if not isinstance(method, str) or not method:
+            return _error_response(msg_id, -32600, "Invalid Request")
+
+        params = message.get("params", {})
+        if not isinstance(params, dict):
+            return _error_response(msg_id, -32602, "Invalid params")
 
         conn = self.get_connection(server_name)
         if conn is None:
@@ -101,6 +110,12 @@ class ProxyEndpoint:
         """Forward a tool call to the backend and return the result."""
         tool_name = params.get("name", "")
         arguments = params.get("arguments", {})
+        if (
+            not isinstance(tool_name, str)
+            or not tool_name.strip()
+            or not isinstance(arguments, dict)
+        ):
+            return _error_response(msg_id, -32602, "Invalid params")
 
         start = time.time()
         success = False
@@ -109,7 +124,11 @@ class ProxyEndpoint:
             success = True
             return _success_response(msg_id, result)
         except Exception as exc:
-            logger.error("Proxy tool call %s failed: %s", tool_name, exc)
+            logger.error(
+                "Proxy tool call failed for server %s (%s)",
+                conn.name,
+                type(exc).__name__,
+            )
             return _error_response(msg_id, -32603, "Internal server error")
         finally:
             duration_ms = int((time.time() - start) * 1000)
@@ -125,7 +144,9 @@ class ProxyEndpoint:
                         success=success,
                     )
                 except Exception as exc:
-                    logger.debug("Plugin notification failed: %s", exc)
+                    logger.debug(
+                        "Plugin notification failed (%s)", type(exc).__name__
+                    )
 
     async def _proxy_resource_read(
         self,
@@ -135,12 +156,18 @@ class ProxyEndpoint:
     ) -> dict[str, Any]:
         """Forward a resource read to the backend."""
         uri = params.get("uri", "")
+        if not isinstance(uri, str) or not uri.strip():
+            return _error_response(msg_id, -32602, "Invalid params")
 
         try:
             result = await conn.read_resource(uri)
             return _success_response(msg_id, result)
         except Exception as exc:
-            logger.error("Proxy resource read %s failed: %s", uri, exc)
+            logger.error(
+                "Proxy resource read failed for server %s (%s)",
+                conn.name,
+                type(exc).__name__,
+            )
             return _error_response(msg_id, -32603, "Internal server error")
 
     async def _proxy_prompt_get(
@@ -152,12 +179,22 @@ class ProxyEndpoint:
         """Forward a prompt get to the backend."""
         name = params.get("name", "")
         arguments = params.get("arguments", {})
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(arguments, dict)
+        ):
+            return _error_response(msg_id, -32602, "Invalid params")
 
         try:
             result = await conn.get_prompt(name, arguments)
             return _success_response(msg_id, result)
         except Exception as exc:
-            logger.error("Proxy prompt get %s failed: %s", name, exc)
+            logger.error(
+                "Proxy prompt get failed for server %s (%s)",
+                conn.name,
+                type(exc).__name__,
+            )
             return _error_response(msg_id, -32603, "Internal server error")
 
     def list_available_servers(self) -> list[dict[str, Any]]:

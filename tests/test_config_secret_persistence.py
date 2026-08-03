@@ -181,3 +181,33 @@ def test_programmatic_config_is_validated_before_materialization() -> None:
 
     with pytest.raises(ConfigValidationError, match="env"):
         materialize_server_config(invalid)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        MCPServerConfig(name="", transport="stdio", command="echo"),
+        MCPServerConfig(
+            name="invalid-boolean",
+            transport="stdio",
+            command="echo",
+            enabled="yes",  # type: ignore[arg-type]
+        ),
+        MCPServerConfig(
+            name="invalid-cost",
+            transport="stdio",
+            command="echo",
+            cost_per_call_cents=-1,
+        ),
+    ],
+)
+def test_programmatic_config_rejects_invalid_metadata(
+    config: MCPServerConfig,
+) -> None:
+    with pytest.raises(ConfigValidationError):
+        materialize_server_config(config)
+
+
+def test_parse_rejects_non_object_server_config() -> None:
+    with pytest.raises(ConfigValidationError, match="object"):
+        parse_mcp_server("invalid", [])  # type: ignore[arg-type]
