@@ -19,6 +19,7 @@ from slm_mcp_hub.core.config import (
     import_claude_config,
     import_vscode_config,
     load_config,
+    materialize_server_config,
     save_config,
 )
 from slm_mcp_hub.core.constants import DEFAULT_PORT, NAMESPACE_DELIMITER, VERSION
@@ -200,12 +201,13 @@ class TestConfig:
         assert path.exists()
         assert config.port == DEFAULT_PORT
 
-    def test_env_var_resolution(self, sample_claude_json, monkeypatch):
-        """${VAR} placeholders resolved from environment."""
+    def test_env_var_resolution_is_deferred_to_runtime(self, sample_claude_json, monkeypatch):
+        """Imports preserve placeholders and materialize a runtime-only copy."""
         monkeypatch.setenv("GITHUB_TOKEN", "ghp_test123")
         servers = import_claude_config(sample_claude_json)
         github = next(s for s in servers if s.name == "github")
-        assert github.env.get("GITHUB_TOKEN") == "ghp_test123"
+        assert github.env.get("GITHUB_TOKEN") == "${GITHUB_TOKEN}"
+        assert materialize_server_config(github).env.get("GITHUB_TOKEN") == "ghp_test123"
 
     def test_save_config_with_env_dict(self, tmp_dir):
         """Round-trip save/load with srv.env set (line 213)."""

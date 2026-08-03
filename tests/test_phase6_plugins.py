@@ -172,6 +172,46 @@ class TestSLMPlugin:
         assert plugin.slm_url == "http://env:1234"
 
     @pytest.mark.asyncio
+    async def test_api_key_from_env_is_attached_to_daemon_client(self, monkeypatch) -> None:
+        monkeypatch.setenv("SLM_API_KEY", "api-key-sentinel")
+        plugin = SLMPlugin(slm_url="http://secured:8765")
+        mock_hub = MagicMock(spec=HubOrchestrator)
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get = AsyncMock(return_value=_ok_response({
+            "status": "running", "mode": "b", "fact_count": 1,
+        }))
+
+        with patch(
+            "slm_mcp_hub.plugins.slm_http.httpx.AsyncClient",
+            return_value=mock_client,
+        ) as client_factory:
+            await plugin.on_hub_start(mock_hub)
+
+        assert client_factory.call_args.kwargs["headers"] == {
+            "X-SLM-API-Key": "api-key-sentinel",
+        }
+        assert plugin.available is True
+
+    @pytest.mark.asyncio
+    async def test_daemon_client_has_no_auth_header_without_api_key(self, monkeypatch) -> None:
+        monkeypatch.delenv("SLM_API_KEY", raising=False)
+        plugin = SLMPlugin(slm_url="http://trusted-loopback:8765")
+        mock_hub = MagicMock(spec=HubOrchestrator)
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.get = AsyncMock(return_value=_ok_response({
+            "status": "running", "mode": "b", "fact_count": 1,
+        }))
+
+        with patch(
+            "slm_mcp_hub.plugins.slm_http.httpx.AsyncClient",
+            return_value=mock_client,
+        ) as client_factory:
+            await plugin.on_hub_start(mock_hub)
+
+        assert client_factory.call_args.kwargs["headers"] == {}
+        assert plugin.available is True
+
+    @pytest.mark.asyncio
     async def test_on_hub_start_daemon_reachable(self, slm_plugin: SLMPlugin) -> None:
         mock_hub = MagicMock(spec=HubOrchestrator)
         mock_client = AsyncMock(spec=httpx.AsyncClient)
@@ -179,7 +219,7 @@ class TestSLMPlugin:
             "status": "running", "mode": "b", "fact_count": 4451,
         }))
 
-        with patch("slm_mcp_hub.plugins.slm_plugin.httpx.AsyncClient", return_value=mock_client):
+        with patch("slm_mcp_hub.plugins.slm_plugin.create_slm_http_client", return_value=mock_client):
             await slm_plugin.on_hub_start(mock_hub)
 
         assert slm_plugin.available is True
@@ -190,7 +230,7 @@ class TestSLMPlugin:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
 
-        with patch("slm_mcp_hub.plugins.slm_plugin.httpx.AsyncClient", return_value=mock_client):
+        with patch("slm_mcp_hub.plugins.slm_plugin.create_slm_http_client", return_value=mock_client):
             await slm_plugin.on_hub_start(mock_hub)
 
         assert slm_plugin.available is False
@@ -201,7 +241,7 @@ class TestSLMPlugin:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.get = AsyncMock(side_effect=httpx.TimeoutException("timeout"))
 
-        with patch("slm_mcp_hub.plugins.slm_plugin.httpx.AsyncClient", return_value=mock_client):
+        with patch("slm_mcp_hub.plugins.slm_plugin.create_slm_http_client", return_value=mock_client):
             await slm_plugin.on_hub_start(mock_hub)
 
         assert slm_plugin.available is False
@@ -212,7 +252,7 @@ class TestSLMPlugin:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.get = AsyncMock(return_value=_ok_response({"status": "starting"}))
 
-        with patch("slm_mcp_hub.plugins.slm_plugin.httpx.AsyncClient", return_value=mock_client):
+        with patch("slm_mcp_hub.plugins.slm_plugin.create_slm_http_client", return_value=mock_client):
             await slm_plugin.on_hub_start(mock_hub)
 
         assert slm_plugin.available is False
@@ -223,7 +263,7 @@ class TestSLMPlugin:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.get = AsyncMock(return_value=_error_response(503))
 
-        with patch("slm_mcp_hub.plugins.slm_plugin.httpx.AsyncClient", return_value=mock_client):
+        with patch("slm_mcp_hub.plugins.slm_plugin.create_slm_http_client", return_value=mock_client):
             await slm_plugin.on_hub_start(mock_hub)
 
         assert slm_plugin.available is False
@@ -234,7 +274,7 @@ class TestSLMPlugin:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.get = AsyncMock(side_effect=ValueError("unexpected"))
 
-        with patch("slm_mcp_hub.plugins.slm_plugin.httpx.AsyncClient", return_value=mock_client):
+        with patch("slm_mcp_hub.plugins.slm_plugin.create_slm_http_client", return_value=mock_client):
             await slm_plugin.on_hub_start(mock_hub)
 
         assert slm_plugin.available is False
@@ -476,6 +516,46 @@ class TestMeshPlugin:
         assert mesh_plugin.available is False
 
     @pytest.mark.asyncio
+    async def test_mesh_uses_authenticated_slm_client(self, monkeypatch) -> None:
+        monkeypatch.setenv("SLM_API_KEY", "mesh-key-sentinel")
+        plugin = MeshPlugin(slm_url="http://secured:8765")
+        mock_hub = MagicMock(spec=HubOrchestrator)
+        mock_hub.config = MagicMock(host="127.0.0.1", port=52414)
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post = AsyncMock(return_value=_ok_response({"peer_id": "peer-1"}))
+
+        with patch(
+            "slm_mcp_hub.plugins.mesh_plugin.create_slm_http_client",
+            return_value=mock_client,
+        ) as client_factory:
+            await plugin.on_hub_start(mock_hub)
+
+        client_factory.assert_called_once_with(timeout=2.0)
+        assert plugin.available is True
+
+    @pytest.mark.asyncio
+    async def test_mesh_auth_failure_is_visible_without_leaking_key(
+        self,
+        monkeypatch,
+        caplog,
+    ) -> None:
+        monkeypatch.setenv("SLM_API_KEY", "mesh-key-sentinel")
+        plugin = MeshPlugin(slm_url="http://secured:8765")
+        mock_hub = MagicMock(spec=HubOrchestrator)
+        mock_client = AsyncMock(spec=httpx.AsyncClient)
+        mock_client.post = AsyncMock(return_value=_error_response(403))
+
+        with patch(
+            "slm_mcp_hub.plugins.mesh_plugin.create_slm_http_client",
+            return_value=mock_client,
+        ):
+            await plugin.on_hub_start(mock_hub)
+
+        assert plugin.available is False
+        assert "authentication rejected" in caplog.text.lower()
+        assert "mesh-key-sentinel" not in caplog.text
+
+    @pytest.mark.asyncio
     async def test_on_hub_start_daemon_reachable(self, mesh_plugin: MeshPlugin) -> None:
         mock_hub = MagicMock(spec=HubOrchestrator)
         mock_hub.config = MagicMock()
@@ -484,7 +564,7 @@ class TestMeshPlugin:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.post = AsyncMock(return_value=_ok_response({"peer_id": "abc-123"}))
 
-        with patch("slm_mcp_hub.plugins.mesh_plugin.httpx.AsyncClient", return_value=mock_client):
+        with patch("slm_mcp_hub.plugins.mesh_plugin.create_slm_http_client", return_value=mock_client):
             await mesh_plugin.on_hub_start(mock_hub)
 
         assert mesh_plugin.available is True
@@ -496,7 +576,7 @@ class TestMeshPlugin:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
 
-        with patch("slm_mcp_hub.plugins.mesh_plugin.httpx.AsyncClient", return_value=mock_client):
+        with patch("slm_mcp_hub.plugins.mesh_plugin.create_slm_http_client", return_value=mock_client):
             await mesh_plugin.on_hub_start(mock_hub)
 
         assert mesh_plugin.available is False
@@ -507,7 +587,7 @@ class TestMeshPlugin:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.post = AsyncMock(return_value=_error_response(500))
 
-        with patch("slm_mcp_hub.plugins.mesh_plugin.httpx.AsyncClient", return_value=mock_client):
+        with patch("slm_mcp_hub.plugins.mesh_plugin.create_slm_http_client", return_value=mock_client):
             await mesh_plugin.on_hub_start(mock_hub)
 
         assert mesh_plugin.available is False
@@ -518,7 +598,7 @@ class TestMeshPlugin:
         mock_client = AsyncMock(spec=httpx.AsyncClient)
         mock_client.post = AsyncMock(side_effect=ValueError("unexpected"))
 
-        with patch("slm_mcp_hub.plugins.mesh_plugin.httpx.AsyncClient", return_value=mock_client):
+        with patch("slm_mcp_hub.plugins.mesh_plugin.create_slm_http_client", return_value=mock_client):
             await mesh_plugin.on_hub_start(mock_hub)
 
         assert mesh_plugin.available is False

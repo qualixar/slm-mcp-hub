@@ -11,7 +11,7 @@ from collections import deque
 from enum import Enum
 from typing import Any
 
-from slm_mcp_hub.core.config import MCPServerConfig
+from slm_mcp_hub.core.config import MCPServerConfig, materialize_server_config
 from slm_mcp_hub.core.constants import DEFAULT_TOOL_TIMEOUT_S, MCP_REQUEST_TIMEOUT_MS, VERSION
 
 logger = logging.getLogger(__name__)
@@ -213,11 +213,12 @@ class MCPConnection:
 
     async def _connect_stdio(self) -> None:
         """Start a child process and perform MCP initialization handshake."""
-        cmd = self._config.command
-        args = list(self._config.args)
+        runtime_config = materialize_server_config(self._config)
+        cmd = runtime_config.command
+        args = list(runtime_config.args)
 
         env = dict(os.environ)
-        env.update(self._config.env)
+        env.update(runtime_config.env)
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -278,11 +279,12 @@ class MCPConnection:
                 f"httpx required for HTTP transport. Install with: pip install httpx"
             )
 
-        self._http_url = self._config.url
+        runtime_config = materialize_server_config(self._config)
+        self._http_url = runtime_config.url
         self._http_client = httpx.AsyncClient(
             headers={
                 "Accept": "application/json, text/event-stream",
-                **self._config.headers,
+                **runtime_config.headers,
             },
             timeout=httpx.Timeout(MCP_REQUEST_TIMEOUT_MS / 1000),
         )
@@ -311,7 +313,10 @@ class MCPConnection:
             self._state = ConnectionState.ERROR
             if hasattr(self, "_http_client"):
                 await self._http_client.aclose()
-            raise ConnectionError(f"HTTP MCP {self.name} initialization failed: {exc}")
+            raise ConnectionError(
+                f"HTTP MCP {self.name} initialization failed "
+                f"({type(exc).__name__})"
+            ) from None
 
     async def _discover_capabilities(self) -> None:
         """Discover all tools, resources, and prompts from the MCP server."""

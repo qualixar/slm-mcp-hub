@@ -94,6 +94,31 @@ class TestMCPConnectionDisconnect:
 
 class TestMCPConnectionErrors:
     @pytest.mark.asyncio
+    async def test_stdio_materializes_placeholders_only_at_spawn(self, monkeypatch):
+        monkeypatch.setenv("HUB_COMMAND", "resolved-command")
+        monkeypatch.setenv("HUB_TOKEN", "resolved-token")
+        spawn = AsyncMock(side_effect=FileNotFoundError)
+        c = MCPConnection(_cfg(
+            command="${HUB_COMMAND}",
+            args=("--token=${HUB_TOKEN}",),
+            env={"TOKEN": "${env:HUB_TOKEN}"},
+        ))
+
+        with patch(
+            "slm_mcp_hub.federation.connection.asyncio.create_subprocess_exec",
+            spawn,
+        ):
+            with pytest.raises(ConnectionError, match="Command not found"):
+                await c._connect_stdio()
+
+        args = spawn.await_args.args
+        env = spawn.await_args.kwargs["env"]
+        assert args[:2] == ("resolved-command", "--token=resolved-token")
+        assert env["TOKEN"] == "resolved-token"
+        assert c._config.command == "${HUB_COMMAND}"
+        assert c._config.env == {"TOKEN": "${env:HUB_TOKEN}"}
+
+    @pytest.mark.asyncio
     async def test_connect_command_not_found(self):
         c = MCPConnection(_cfg(command="/no/such/binary_xyz_999"))
         with pytest.raises(ConnectionError, match="Command not found"):
@@ -114,6 +139,26 @@ class TestMCPConnectionErrors:
         c = MCPConnection(_cfg(transport="http", url="http://127.0.0.1:1/mcp"))
         with pytest.raises(ConnectionError, match="initialization failed"):
             await c.connect()
+
+    @pytest.mark.asyncio
+    async def test_http_connection_error_never_leaks_resolved_url_secret(self, monkeypatch):
+        monkeypatch.setenv("HUB_URL_TOKEN", "resolved-url-sentinel")
+        c = MCPConnection(_cfg(
+            transport="http",
+            url="https://example.test/${HUB_URL_TOKEN}/mcp",
+        ))
+        mock_client = AsyncMock()
+        c._send_request = AsyncMock(side_effect=RuntimeError(
+            "request failed at https://example.test/resolved-url-sentinel/mcp"
+        ))
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            with pytest.raises(ConnectionError) as error:
+                await c._connect_http()
+
+        assert c._http_url == "https://example.test/resolved-url-sentinel/mcp"
+        assert "resolved-url-sentinel" not in str(error.value)
+        assert "initialization failed" in str(error.value)
 
     @pytest.mark.asyncio
     async def test_call_tool_not_connected(self):
@@ -397,6 +442,7 @@ class TestMCPConnectionStdioHandshake:
         mock_stdout = AsyncMock()
         mock_stdout.readline = AsyncMock(return_value=b"")
         mock_stderr = AsyncMock()
+        mock_stderr.readline = AsyncMock(return_value=b"")
 
         mock_proc = MagicMock()
         mock_proc.stdin = mock_stdin
@@ -456,6 +502,7 @@ class TestMCPConnectionStdioHandshake:
         mock_stdout = AsyncMock()
         mock_stdout.readline = AsyncMock(return_value=b"")
         mock_stderr = AsyncMock()
+        mock_stderr.readline = AsyncMock(return_value=b"")
 
         mock_proc = MagicMock()
         mock_proc.stdin = mock_stdin

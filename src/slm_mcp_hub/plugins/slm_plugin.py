@@ -23,6 +23,10 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from slm_mcp_hub.plugins.base import HubPlugin
+from slm_mcp_hub.plugins.slm_http import (
+    create_slm_http_client,
+    is_slm_auth_rejection,
+)
 
 if TYPE_CHECKING:
     from slm_mcp_hub.core.hub import HubOrchestrator
@@ -107,10 +111,12 @@ class SLMPlugin(HubPlugin):
     async def on_hub_start(self, hub: HubOrchestrator) -> None:
         """Check if SLM daemon is reachable via HTTP."""
         self._hub = hub
-        self._client = httpx.AsyncClient(timeout=HTTP_TIMEOUT)
+        self._client = create_slm_http_client(timeout=HTTP_TIMEOUT)
 
         try:
             resp = await self._client.get(f"{self._slm_url}/status")
+            if self._reject_auth_failure(resp, "status check"):
+                return
             if resp.status_code == 200:
                 data = resp.json()
                 self._available = data.get("status") == "running"
@@ -198,6 +204,8 @@ class SLMPlugin(HubPlugin):
                     "limit": 5,
                 },
             )
+            if self._reject_auth_failure(resp, "session recall"):
+                return
             if resp.status_code == 200:
                 data = resp.json()
                 self._session_contexts[session_id]["recalled"] = data
@@ -288,7 +296,7 @@ class SLMPlugin(HubPlugin):
         if not self._client:
             return
         try:
-            await self._client.post(
+            response = await self._client.post(
                 f"{self._slm_url}/api/v3/tool-event",
                 json={
                     "tool_name": tool_name,
@@ -299,5 +307,17 @@ class SLMPlugin(HubPlugin):
                     "project_path": project_path,
                 },
             )
+            self._reject_auth_failure(response, "tool-event write")
         except Exception as exc:
             logger.debug("SLM tool-event POST failed: %s", exc)
+
+    def _reject_auth_failure(self, response: httpx.Response, operation: str) -> bool:
+        """Disable the plugin on an auth rejection without exposing credentials."""
+        if not is_slm_auth_rejection(response):
+            return False
+        self._available = False
+        logger.warning(
+            "SLM plugin authentication rejected during %s; configure SLM_API_KEY",
+            operation,
+        )
+        return True

@@ -21,6 +21,10 @@ from typing import TYPE_CHECKING, Any
 import httpx
 
 from slm_mcp_hub.plugins.base import HubPlugin
+from slm_mcp_hub.plugins.slm_http import (
+    create_slm_http_client,
+    is_slm_auth_rejection,
+)
 
 if TYPE_CHECKING:
     from slm_mcp_hub.core.hub import HubOrchestrator
@@ -96,7 +100,7 @@ class MeshPlugin(HubPlugin):
     async def on_hub_start(self, hub: HubOrchestrator) -> None:
         """Register hub as a mesh peer via HTTP."""
         self._hub = hub
-        self._client = httpx.AsyncClient(timeout=HTTP_TIMEOUT)
+        self._client = create_slm_http_client(timeout=HTTP_TIMEOUT)
 
         try:
             resp = await self._client.post(
@@ -110,13 +114,15 @@ class MeshPlugin(HubPlugin):
                     "agent_type": "mcp-hub",
                 },
             )
+            if self._reject_auth_failure(resp, "mesh registration"):
+                return
             if resp.status_code == 200:
                 data = resp.json()
                 self._peer_id = data.get("peer_id", "")
                 self._available = True
                 logger.info("Mesh plugin registered as peer %s", self._peer_id)
             else:
-                logger.warning("Mesh register returned %d: %s", resp.status_code, resp.text[:200])
+                logger.warning("Mesh register returned HTTP %d", resp.status_code)
                 self._available = False
         except (httpx.ConnectError, httpx.TimeoutException) as exc:
             logger.info("Mesh plugin: daemon not reachable at %s — disabled (%s)", self._slm_url, exc)
@@ -214,6 +220,8 @@ class MeshPlugin(HubPlugin):
                     "action": "acquire",
                 },
             )
+            if self._reject_auth_failure(resp, "mesh lock acquisition"):
+                return False
             return resp.status_code == 200
         except Exception as exc:
             logger.warning("Mesh lock acquire failed: %s", exc)
@@ -225,7 +233,7 @@ class MeshPlugin(HubPlugin):
             return
 
         try:
-            await self._client.post(
+            response = await self._client.post(
                 f"{self._slm_url}/mesh/lock",
                 json={
                     "file_path": resource,
@@ -233,6 +241,7 @@ class MeshPlugin(HubPlugin):
                     "action": "release",
                 },
             )
+            self._reject_auth_failure(response, "mesh lock release")
         except Exception as exc:
             logger.warning("Mesh lock release failed: %s", exc)
 
@@ -251,7 +260,7 @@ class MeshPlugin(HubPlugin):
         if not self._client:
             return
         try:
-            await self._client.post(
+            response = await self._client.post(
                 f"{self._slm_url}/mesh/send",
                 json={
                     "from_peer": self._peer_id,
@@ -260,5 +269,17 @@ class MeshPlugin(HubPlugin):
                     "type": "text",
                 },
             )
+            self._reject_auth_failure(response, "mesh send")
         except Exception as exc:
             logger.debug("Mesh send failed: %s", exc)
+
+    def _reject_auth_failure(self, response: httpx.Response, operation: str) -> bool:
+        """Disable mesh on an auth rejection without exposing credentials."""
+        if not is_slm_auth_rejection(response):
+            return False
+        self._available = False
+        logger.warning(
+            "Mesh plugin authentication rejected during %s; configure SLM_API_KEY",
+            operation,
+        )
+        return True

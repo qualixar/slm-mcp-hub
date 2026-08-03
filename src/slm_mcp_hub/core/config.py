@@ -6,7 +6,8 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +24,11 @@ from slm_mcp_hub.core.constants import (
 )
 
 logger = logging.getLogger(__name__)
+SUPPORTED_TRANSPORTS = frozenset({"stdio", "http", "sse"})
+
+
+class ConfigValidationError(ValueError):
+    """Raised when persisted or programmatic server config is malformed."""
 
 
 @dataclass(frozen=True)
@@ -71,54 +77,99 @@ def _resolve_env_vars(value: str) -> str:
     return value
 
 
-def _resolve_env_in_dict(d: dict[str, Any]) -> dict[str, Any]:
-    """Recursively resolve environment variables in a dict."""
-    result = {}
-    for key, val in d.items():
-        if isinstance(val, str):
-            result[key] = _resolve_env_vars(val)
-        elif isinstance(val, dict):
-            result[key] = _resolve_env_in_dict(val)
-        elif isinstance(val, list):
-            result[key] = [
-                _resolve_env_vars(v) if isinstance(v, str) else v for v in val
-            ]
-        else:
-            result[key] = val
-    return result
+def _validate_string_map(field_name: str, value: object) -> None:
+    if not isinstance(value, Mapping) or any(
+        not isinstance(key, str) or not isinstance(item, str)
+        for key, item in value.items()
+    ):
+        raise ConfigValidationError(
+            f"Server {field_name} must be an object containing string values"
+        )
+
+
+def validate_server_config(config: MCPServerConfig) -> None:
+    """Validate a server config without including sensitive values in errors."""
+    if not isinstance(config.name, str) or not config.name.strip():
+        raise ConfigValidationError("Server name must be a non-empty string")
+    if config.transport not in SUPPORTED_TRANSPORTS:
+        raise ConfigValidationError(
+            "Server transport must be one of: http, sse, stdio"
+        )
+    if not isinstance(config.command, str):
+        raise ConfigValidationError("Server command must be a string")
+    if not isinstance(config.args, tuple) or any(
+        not isinstance(item, str) for item in config.args
+    ):
+        raise ConfigValidationError("Server args must contain only strings")
+    _validate_string_map("env", config.env)
+    if not isinstance(config.url, str):
+        raise ConfigValidationError("Server url must be a string")
+    _validate_string_map("headers", config.headers)
+    for field_name in ("enabled", "always_on", "no_cache"):
+        if not isinstance(getattr(config, field_name), bool):
+            raise ConfigValidationError(f"Server {field_name} must be a boolean")
+    cost = config.cost_per_call_cents
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)) or cost < 0:
+        raise ConfigValidationError(
+            "Server cost_per_call_cents must be a non-negative number"
+        )
+
+
+def materialize_server_config(config: MCPServerConfig) -> MCPServerConfig:
+    """Create a runtime config with environment placeholders resolved.
+
+    The input remains the canonical persisted representation. Keeping expansion at
+    the connection boundary prevents config saves and snapshots from receiving
+    resolved credentials.
+    """
+    validate_server_config(config)
+    return replace(
+        config,
+        command=_resolve_env_vars(config.command),
+        args=tuple(_resolve_env_vars(value) for value in config.args),
+        env={key: _resolve_env_vars(value) for key, value in config.env.items()},
+        url=_resolve_env_vars(config.url),
+        headers={
+            key: _resolve_env_vars(value) for key, value in config.headers.items()
+        },
+    )
 
 
 def parse_mcp_server(name: str, raw: dict[str, Any]) -> MCPServerConfig:
-    """Parse a single MCP server entry from config JSON."""
-    resolved = _resolve_env_in_dict(raw)
-
-    if "url" in resolved:
-        transport = resolved.get("type", "http")
-        return MCPServerConfig(
+    """Parse a server while preserving unresolved persisted values."""
+    if not isinstance(raw, dict):
+        raise ConfigValidationError("Server configuration must be an object")
+    if "url" in raw:
+        transport = raw.get("type", "http")
+        config = MCPServerConfig(
             name=name,
             transport=transport,
-            url=resolved["url"],
-            headers=resolved.get("headers", {}),
-            enabled=resolved.get("enabled", True),
-            always_on=resolved.get("always_on", False),
-            no_cache=resolved.get("no_cache", False),
-            cost_per_call_cents=resolved.get("cost_per_call_cents", 0.0),
+            url=raw["url"],
+            headers=raw.get("headers", {}),
+            enabled=raw.get("enabled", True),
+            always_on=raw.get("always_on", False),
+            no_cache=raw.get("no_cache", False),
+            cost_per_call_cents=raw.get("cost_per_call_cents", 0.0),
         )
+        validate_server_config(config)
+        return config
 
-    command = resolved.get("command", "")
-    args = tuple(resolved.get("args", []))
-    env = resolved.get("env", {})
-    return MCPServerConfig(
+    command = raw.get("command", "")
+    args = tuple(raw.get("args", []))
+    env = raw.get("env", {})
+    config = MCPServerConfig(
         name=name,
         transport="stdio",
         command=command,
         args=args,
         env=env,
-        enabled=resolved.get("enabled", True),
-        always_on=resolved.get("always_on", False),
-        no_cache=resolved.get("no_cache", False),
-        cost_per_call_cents=resolved.get("cost_per_call_cents", 0.0),
+        enabled=raw.get("enabled", True),
+        always_on=raw.get("always_on", False),
+        no_cache=raw.get("no_cache", False),
+        cost_per_call_cents=raw.get("cost_per_call_cents", 0.0),
     )
+    validate_server_config(config)
+    return config
 
 
 def load_config(config_path: Path | None = None) -> HubConfig:
@@ -316,6 +367,7 @@ def save_config(config: HubConfig, config_path: Path | None = None, force: bool 
 
     servers_dict = {}
     for srv in config.mcp_servers:
+        validate_server_config(srv)
         entry: dict[str, Any] = {"enabled": srv.enabled}
         if srv.transport == "stdio":
             entry["command"] = srv.command
