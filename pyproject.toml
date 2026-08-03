@@ -31,9 +31,9 @@ dependencies = [
 
 [project.optional-dependencies]
 network = ["zeroconf>=0.131.0"]
-slm = ["superlocalmemory>=3.4.0"]
-mesh = ["superlocalmemory>=3.4.0"]
-full = ["superlocalmemory>=3.4.0"]
+slm = ["superlocalmemory>=3.8.10"]
+mesh = ["superlocalmemory>=3.8.10"]
+full = ["superlocalmemory>=3.8.10"]
 dev = [
     "build>=1.2",
     "httpx2>=2.9,<3",
