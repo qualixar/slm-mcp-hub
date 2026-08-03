@@ -30,7 +30,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-network = ["zeroconf>=0.131.0"]
+network = ["zeroconf>=0.150.0"]
 slm = ["superlocalmemory>=3.4.0"]
 mesh = ["superlocalmemory>=3.4.0"]
 full = ["superlocalmemory>=3.4.0"]
@@ -43,7 +43,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "pytest-cov>=5.0",
     "ruff>=0.12",
-    "zeroconf>=0.131.0",
+    "zeroconf>=0.150.0",
 ]
 
 [project.scripts]
