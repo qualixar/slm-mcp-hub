@@ -230,6 +230,13 @@ class _Response:
 
 
 class TestOperationalCli:
+    def test_root_help_uses_factual_product_description(self) -> None:
+        result = CliRunner().invoke(cli, ["--help"])
+
+        assert result.exit_code == 0
+        assert "Local-first MCP gateway" in result.output
+        assert "World's First" not in result.output
+
     def test_start_rejects_remote_bind_without_authentication(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

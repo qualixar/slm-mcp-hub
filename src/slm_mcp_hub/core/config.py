@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -181,6 +182,8 @@ def load_config(config_path: Path | None = None) -> HubConfig:
         logger.info("No config file found at %s, using defaults", path)
         return _apply_env_overrides(HubConfig())
 
+    _secure_config_permissions(path)
+
     with open(path) as f:
         raw = json.load(f)
 
@@ -262,6 +265,24 @@ MAX_SNAPSHOTS = 50
 DROP_GUARD_THRESHOLD = 0.7  # refuse save if MCP count drops below 70% of current
 
 
+def _secure_config_permissions(path: Path) -> None:
+    """Restrict live config and retained snapshots without following symlinks."""
+    if path.exists() and not path.is_symlink():
+        path.chmod(0o600)
+
+    snapshots_dir = get_snapshots_dir(path.parent)
+    if not snapshots_dir.exists() or snapshots_dir.is_symlink():
+        return
+    snapshots_dir.chmod(0o700)
+    # Snapshot retention is capped at MAX_SNAPSHOTS. Limit migration work to
+    # that same bounded set during config load.
+    for snapshot in sorted(
+        snapshots_dir.glob("config-*.json"), reverse=True
+    )[:MAX_SNAPSHOTS]:
+        if snapshot.is_file() and not snapshot.is_symlink():
+            snapshot.chmod(0o600)
+
+
 def _snapshot_existing(path: Path) -> Path | None:
     """Snapshot existing config to versioned file before overwriting.
 
@@ -285,12 +306,14 @@ def _snapshot_existing(path: Path) -> Path | None:
 
     snapshots_dir = get_snapshots_dir(path.parent)
     snapshots_dir.mkdir(parents=True, exist_ok=True)
+    snapshots_dir.chmod(0o700)
     import time
     ts = time.strftime("%Y%m%d-%H%M%S")
     snap_path = snapshots_dir / f"config-{ts}-{existing_count}mcps.json"
 
     import shutil
     shutil.copy2(path, snap_path)
+    snap_path.chmod(0o600)
 
     # Prune old snapshots — keep MAX_SNAPSHOTS newest
     snaps = sorted(snapshots_dir.glob("config-*.json"))
@@ -307,12 +330,14 @@ def _atomic_write(path: Path, data: dict) -> None:
     Validates JSON parses before rename. If anything fails, original file
     is untouched.
     """
-    import os
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    tmp_path = Path(tmp_name)
 
     try:
-        with open(tmp_path, "w") as f:
+        with os.fdopen(fd, "w") as f:
             json.dump(data, f, indent=2)
 
         # Verify the file we just wrote parses back identically
@@ -322,6 +347,7 @@ def _atomic_write(path: Path, data: dict) -> None:
             raise RuntimeError("Atomic write verification failed: mcpServers mismatch")
 
         os.replace(tmp_path, path)
+        path.chmod(0o600)
     except Exception:
         if tmp_path.exists():
             tmp_path.unlink()
@@ -339,6 +365,7 @@ def save_config(config: HubConfig, config_path: Path | None = None, force: bool 
     """
     import os
     path = config_path or get_config_file(config.config_dir)
+    _secure_config_permissions(path)
 
     if "PYTEST_CURRENT_TEST" in os.environ:
         real_user_config = (Path.home() / ".slm-mcp-hub" / "config.json").resolve()
@@ -411,6 +438,7 @@ def save_config(config: HubConfig, config_path: Path | None = None, force: bool 
     }
 
     _atomic_write(path, data)
+    _secure_config_permissions(path)
     logger.info("Config saved to %s (%d MCP servers)", path, len(config.mcp_servers))
 
 
@@ -450,6 +478,7 @@ def restore_snapshot(snapshot_name: str, target: Path | None = None) -> Path:
     import shutil
     target.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(snap, target)
+    target.chmod(0o600)
     return target
 
 

@@ -75,7 +75,7 @@ def _setup_logging(level: str, *, stderr_only: bool = False) -> None:
 @click.group()
 @click.version_option(VERSION, prog_name="slm-mcp-hub")
 def cli() -> None:
-    """SLM MCP Hub — The World's First MCP Gateway That Learns."""
+    """SLM MCP Hub — Local-first MCP gateway for federated connections."""
 
 
 def _kill_existing_hub(config_host: str, config_port: int) -> None:
@@ -92,19 +92,20 @@ def _kill_existing_hub(config_host: str, config_port: int) -> None:
 
     if is_running():
         old_pid = read_pid_file()
-        click.echo(f"  Killing existing hub (PID {old_pid})...")
-        try:
-            os.kill(old_pid, signal.SIGTERM)
-            for _ in range(20):
-                time.sleep(0.25)
-                try:
-                    os.kill(old_pid, 0)
-                except ProcessLookupError:
-                    break
-            else:
-                os.kill(old_pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        if old_pid is not None:
+            click.echo(f"  Killing existing hub (PID {old_pid})...")
+            try:
+                os.kill(old_pid, signal.SIGTERM)
+                for _ in range(20):
+                    time.sleep(0.25)
+                    try:
+                        os.kill(old_pid, 0)
+                    except ProcessLookupError:
+                        break
+                else:
+                    os.kill(old_pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
     remove_pid_file()
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

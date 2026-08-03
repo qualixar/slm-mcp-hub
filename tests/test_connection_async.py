@@ -119,6 +119,23 @@ class TestMCPConnectionErrors:
         assert c._config.env == {"TOKEN": "${env:HUB_TOKEN}"}
 
     @pytest.mark.asyncio
+    async def test_stdio_does_not_inherit_unrelated_process_secrets(self, monkeypatch):
+        monkeypatch.setenv("UNRELATED_REVIEW_SECRET", "review-secret-sentinel")
+        spawn = AsyncMock(side_effect=FileNotFoundError)
+        c = MCPConnection(_cfg(env={"EXPLICIT_TOKEN": "allowed"}))
+
+        with patch(
+            "slm_mcp_hub.federation.connection.asyncio.create_subprocess_exec",
+            spawn,
+        ):
+            with pytest.raises(ConnectionError, match="Command not found"):
+                await c._connect_stdio()
+
+        child_env = spawn.await_args.kwargs["env"]
+        assert child_env["EXPLICIT_TOKEN"] == "allowed"
+        assert "UNRELATED_REVIEW_SECRET" not in child_env
+
+    @pytest.mark.asyncio
     async def test_connect_command_not_found(self):
         c = MCPConnection(_cfg(command="/no/such/binary_xyz_999"))
         with pytest.raises(ConnectionError, match="Command not found"):
@@ -716,7 +733,8 @@ class TestMCPConnectionDiscovery:
 
         with pytest.raises(RuntimeError) as exc_info:
             await c._send_request_http("initialize", {})
-        assert "test error: [-1] Unauthorized" in str(exc_info.value)
+        assert "test JSON-RPC error [-1]" in str(exc_info.value)
+        assert "Unauthorized" not in str(exc_info.value)
 
 
 # ===========================================================================

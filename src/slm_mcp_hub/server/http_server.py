@@ -25,6 +25,7 @@ MODERN_PROTOCOL_VERSION = "2026-07-28"
 LEGACY_PROTOCOL_VERSIONS = frozenset(
     {"2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"}
 )
+LOOPBACK_ORIGIN_REGEX = r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$"
 
 
 def _jsonrpc_error(
@@ -74,6 +75,7 @@ def create_app(
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(cors_origins),
+        allow_origin_regex=LOOPBACK_ORIGIN_REGEX,
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],

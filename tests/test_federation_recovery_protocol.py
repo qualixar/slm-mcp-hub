@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import logging
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -109,8 +110,52 @@ class TestHttpMcpProtocol:
         connection._http_url = "https://mcp.example.test"
 
         assert await connection._send_request_http("tools/list", {}) == {"ok": True}
-        with pytest.raises(RuntimeError, match=r"\[-32601\] unknown method"):
+        with pytest.raises(RuntimeError, match=r"JSON-RPC error \[-32601\]"):
             await connection._send_request_http("bad/method", {})
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", [401, 403, 500])
+    async def test_http_non_success_status_fails_closed_without_response_body(
+        self, status_code: int
+    ) -> None:
+        connection = _connection(transport="http", url="https://secret.example.test/token")
+        response = MagicMock(status_code=status_code, headers={"content-type": "application/json"})
+        response.json.return_value = {"detail": "review-secret-sentinel"}
+        connection._http_client = AsyncMock(post=AsyncMock(return_value=response))
+        connection._http_url = "https://secret.example.test/token"
+
+        with pytest.raises(ConnectionError, match=f"HTTP {status_code}") as error:
+            await connection._send_request_http("tools/list", {})
+
+        assert "review-secret-sentinel" not in str(error.value)
+        assert "secret.example" not in str(error.value)
+
+    @pytest.mark.asyncio
+    async def test_http_malformed_json_fails_with_sanitized_error(self) -> None:
+        connection = _connection(transport="http", url="https://secret.example.test/token")
+        response = MagicMock(status_code=200, headers={"content-type": "application/json"})
+        response.json.side_effect = ValueError("review-secret-sentinel")
+        connection._http_client = AsyncMock(post=AsyncMock(return_value=response))
+        connection._http_url = "https://secret.example.test/token"
+
+        with pytest.raises(ConnectionError, match="invalid JSON") as error:
+            await connection._send_request_http("tools/list", {})
+
+        assert "review-secret-sentinel" not in str(error.value)
+
+    @pytest.mark.asyncio
+    async def test_http_request_honors_per_call_timeout(self) -> None:
+        connection = _connection(transport="http", url="https://mcp.example.test")
+
+        async def delayed_post(*args: object, **kwargs: object) -> MagicMock:
+            await asyncio.sleep(0.05)
+            return MagicMock(status_code=204, headers={})
+
+        connection._http_client = AsyncMock(post=delayed_post)
+        connection._http_url = "https://mcp.example.test"
+
+        with pytest.raises(TimeoutError, match="timed out"):
+            await connection._send_request_http("tools/list", {}, timeout_s=0.001)
 
     @pytest.mark.asyncio
     async def test_http_connect_discovers_only_advertised_tools(self) -> None:
@@ -154,20 +199,25 @@ class TestConnectionRecovery:
         http_client.aclose.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_stderr_drain_retains_decoded_tail_and_exit_diagnostic_is_actionable(self) -> None:
-        connection = _connection(command="server", args=("a", "b", "c", "d", "e"))
+    async def test_stderr_drain_omits_sensitive_content_from_logs_and_diagnostics(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        secret = "review-secret-sentinel"
+        connection = _connection(command=secret, args=(secret,))
         stderr = AsyncMock()
-        stderr.readline = AsyncMock(side_effect=[b"first\n", b"\xffsecond\n", b""])
+        stderr.readline = AsyncMock(side_effect=[f"{secret}\n".encode(), b""])
         process = MagicMock(returncode=17)
         process.stderr = stderr
         connection._process = process
 
-        await connection._drain_stderr()
+        with caplog.at_level(logging.DEBUG):
+            await connection._drain_stderr()
         diagnostic = connection._exit_diagnostic()
 
         assert "exit code 17" in diagnostic
-        assert "server a b c d ..." in diagnostic
-        assert "first" in diagnostic and "second" in diagnostic
+        assert "stderr output was captured and omitted" in diagnostic
+        assert secret not in diagnostic
+        assert secret not in caplog.text
 
     @pytest.mark.asyncio
     async def test_stderr_drain_handles_closed_or_broken_pipe(self) -> None:

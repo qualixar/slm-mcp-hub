@@ -447,6 +447,7 @@ class MCPEndpoint:
                 "content": [{"type": "text", "text": f"Error calling '{tool_name}': {arg_error}"}],
                 "isError": True,
             }
+        assert tool_args is not None
 
         # Bug C fix: handle meta-tool calls locally instead of routing
         # through the federation router (which doesn't know about meta-tools).
@@ -525,6 +526,7 @@ class MCPEndpoint:
                 "content": [{"type": "text", "text": f"Error calling '{name}': 'arguments' is invalid: {arg_error}"}],
                 "isError": True,
             }
+        assert arguments is not None
         name = self._META_TOOL_ALIASES.get(name, name)
 
         # Handle Meta-MCP tools locally (including unknown hub__ names)

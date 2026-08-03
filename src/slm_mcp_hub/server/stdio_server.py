@@ -201,6 +201,6 @@ class StdioServer:
         # Redirect sys.stdout and sys.__stdout__ to sys.stderr to completely prevent
         # other python code, third-party libraries, or click from writing to stdout.
         sys.stdout = sys.stderr
-        sys.__stdout__ = sys.stderr
+        sys.__stdout__ = sys.stderr  # type: ignore[misc,assignment]
         
         return reader, writer

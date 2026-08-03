@@ -72,6 +72,18 @@ def test_api_key_accepts_bearer_and_rejects_wrong_values() -> None:
     ).status_code == 200
 
 
+def test_default_cors_accepts_loopback_browser_origins_with_ports() -> None:
+    client, _, _ = _client()
+
+    for origin in ("http://localhost:3000", "http://127.0.0.1:5173"):
+        response = client.options(
+            "/mcp",
+            headers={"Origin": origin, "Access-Control-Request-Method": "POST"},
+        )
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == origin
+
+
 def test_session_greeting_summarizes_tools_by_server() -> None:
     client, _, _ = _client()
     response = client.get("/api/session-greeting")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 import pytest
@@ -148,6 +149,23 @@ def test_snapshot_of_placeholder_config_never_contains_resolved_values(
     assert "resolved-sentinel" not in snapshot
     assert "python-secret-command" not in snapshot
     assert "${HUB_TOKEN}" in snapshot
+
+
+def test_config_and_snapshot_files_are_owner_only(placeholder_config: Path) -> None:
+    placeholder_config.chmod(0o644)
+    snapshot_dir = placeholder_config.parent / "snapshots"
+    snapshot_dir.mkdir()
+    legacy_snapshot = snapshot_dir / "config-20000101-000000-3mcps.json"
+    legacy_snapshot.write_text(placeholder_config.read_text())
+    legacy_snapshot.chmod(0o644)
+
+    save_config(load_config(placeholder_config), placeholder_config, force=True)
+
+    assert stat.S_IMODE(placeholder_config.stat().st_mode) == 0o600
+    assert all(
+        stat.S_IMODE(snapshot.stat().st_mode) == 0o600
+        for snapshot in snapshot_dir.glob("config-*.json")
+    )
 
 
 @pytest.mark.parametrize(
