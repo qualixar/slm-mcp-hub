@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import os
-from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from click.testing import CliRunner
@@ -44,7 +42,7 @@ class TestCLI:
         path = tmp_path / "config.json"
         # We can't easily override CONFIG_FILE in the CLI, so test the function directly
         from slm_mcp_hub.core.config import generate_default_config
-        config = generate_default_config(path)
+        generate_default_config(path)
         assert path.exists()
         data = json.loads(path.read_text())
         assert "mcpServers" in data
@@ -103,7 +101,7 @@ class TestCLI:
         config_path.write_text(json.dumps(config_data))
 
         pid_file = tmp_path / "hub.pid"
-        monkeypatch.setattr("slm_mcp_hub.cli.main.PID_FILE", pid_file)
+        monkeypatch.setattr("slm_mcp_hub.cli.main.get_pid_file", lambda: pid_file)
 
         # Mock asyncio.run to simulate the start command completing
         def mock_asyncio_run(coro):
@@ -123,7 +121,7 @@ class TestCLI:
         config_path.write_text(json.dumps(config_data))
 
         pid_file = tmp_path / "hub.pid"
-        monkeypatch.setattr("slm_mcp_hub.cli.main.PID_FILE", pid_file)
+        monkeypatch.setattr("slm_mcp_hub.cli.main.get_pid_file", lambda: pid_file)
 
         def mock_asyncio_run(coro):
             coro.close()
@@ -138,10 +136,8 @@ class TestCLI:
         """Test status when hub IS running: PID file exists + process alive."""
         pid_file = tmp_path / "hub.pid"
         pid_file.write_text(str(os.getpid()))
-        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.PID_FILE", pid_file)
-        monkeypatch.setattr("slm_mcp_hub.cli.main.PID_FILE", pid_file)
-        monkeypatch.setattr("slm_mcp_hub.cli.main.CONFIG_FILE", tmp_path / "nonexistent.json")
-        monkeypatch.setattr("slm_mcp_hub.core.config.CONFIG_FILE", tmp_path / "nonexistent.json")
+        monkeypatch.setattr("slm_mcp_hub.resilience.watchdog.get_pid_file", lambda: pid_file)
+        monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path / "isolated"))
 
         result = runner.invoke(cli, ["status"])
         assert result.exit_code == 0
@@ -163,8 +159,7 @@ class TestCLI:
         config_path = tmp_path / "config.json"
         config_path.write_text(json.dumps(config_data))
 
-        # Patch CONFIG_FILE in the config module (where load_config reads from)
-        monkeypatch.setattr("slm_mcp_hub.core.config.CONFIG_FILE", config_path)
+        monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
 
         result = runner.invoke(cli, ["config", "show"])
         assert result.exit_code == 0
@@ -175,7 +170,7 @@ class TestCLI:
         """Test config init when config exists and user declines (line 168)."""
         config_path = tmp_path / "config.json"
         config_path.write_text("{}")
-        monkeypatch.setattr("slm_mcp_hub.cli.main.CONFIG_FILE", config_path)
+        monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
 
         # Simulate user saying 'n' to overwrite
         result = runner.invoke(cli, ["config", "init"], input="n\n")
@@ -196,7 +191,7 @@ class TestCLI:
         config_path.write_text(json.dumps(config_data))
 
         pid_file = tmp_path / "hub.pid"
-        monkeypatch.setattr("slm_mcp_hub.cli.main.PID_FILE", pid_file)
+        monkeypatch.setattr("slm_mcp_hub.cli.main.get_pid_file", lambda: pid_file)
 
         hub_mock = MagicMock()
         hub_mock.plugins = []
@@ -229,7 +224,7 @@ class TestCLI:
         config_path.write_text(json.dumps(config_data))
 
         pid_file = tmp_path / "hub.pid"
-        monkeypatch.setattr("slm_mcp_hub.cli.main.PID_FILE", pid_file)
+        monkeypatch.setattr("slm_mcp_hub.cli.main.get_pid_file", lambda: pid_file)
 
         hub_mock = MagicMock()
         hub_mock.plugins = []
@@ -252,4 +247,3 @@ class TestCLI:
         assert result.exit_code == 0
         call_args = mock_hub_cls.call_args[0][0]
         assert call_args.port == 9999
-

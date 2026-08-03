@@ -15,7 +15,7 @@ Coverage:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
@@ -25,10 +25,9 @@ from slm_mcp_hub.cli.server_commands import _parse_env_args, server
 
 @pytest.fixture()
 def temp_config(tmp_path, monkeypatch):
-    """Redirect CONFIG_FILE to tmp_path so tests don't touch the real config."""
+    """Redirect dynamic config lookup to tmp_path so tests never touch user data."""
     cfg_path = tmp_path / "config.json"
-    monkeypatch.setattr("slm_mcp_hub.core.constants.CONFIG_FILE", cfg_path)
-    monkeypatch.setattr("slm_mcp_hub.core.config.CONFIG_FILE", cfg_path)
+    monkeypatch.setenv("SLM_HUB_CONFIG_DIR", str(tmp_path))
     return cfg_path
 
 

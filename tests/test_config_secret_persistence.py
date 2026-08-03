@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from slm_mcp_hub.core import config as config_module
 from slm_mcp_hub.core.config import (
     ConfigValidationError,
     MCPServerConfig,
@@ -139,8 +138,7 @@ def test_snapshot_of_placeholder_config_never_contains_resolved_values(
 ) -> None:
     monkeypatch.setenv("HUB_COMMAND", "python-secret-command")
     monkeypatch.setenv("HUB_TOKEN", "resolved-sentinel")
-    snapshot_dir = tmp_path / "snapshots"
-    monkeypatch.setattr(config_module, "SNAPSHOTS_DIR", snapshot_dir)
+    snapshot_dir = placeholder_config.parent / "snapshots"
 
     save_config(load_config(placeholder_config), placeholder_config, force=True)
 
