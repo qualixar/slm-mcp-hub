@@ -8,10 +8,16 @@
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 [![Status](https://img.shields.io/badge/status-alpha-orange)](https://github.com/qualixar/slm-mcp-hub/issues)
 
-**One local endpoint in front of every MCP server you run.** Connect your AI
-clients to the hub once; the hub connects to your backends once, shares them
-across every session, and adds governance, observability, and reliability on
-top. Part of Qualixar's work on AI Reliability Engineering.
+**Run every MCP server once. Reach them from every client through one local endpoint.**
+
+SLM MCP Hub sits between your AI clients and your MCP servers: clients connect
+to the hub, the hub connects to each backend once and shares it across every
+session — adding governance, observability, and reliability on top. Part of
+Qualixar's work on AI Reliability Engineering.
+
+**Who it's for:** anyone running more than one MCP client (Claude Code, Cursor,
+Windsurf, Claude Desktop, custom agents) against a shared set of servers — or
+anyone whose machine is buckling under duplicate MCP subprocesses.
 
 > **Alpha software.** The interfaces work and are tested, but they can still
 > change between releases. Please file reproducible failures through
@@ -36,6 +42,17 @@ Run a few sessions and the math turns ugly fast:
 
 The hub runs each backend once, multiplexes every client through a single
 endpoint, and keeps memory bounded while your tools stay one call away.
+
+### Hub vs configuring servers in each client
+
+| | Per-client config | With SLM MCP Hub |
+|---|---|---|
+| **Processes** | every client spawns every server | each server runs once, shared |
+| **RAM** | grows with every session | bounded by spawn policy + LRU cap |
+| **Server config** | duplicated in every client | one file, one place |
+| **Adding a server** | edit every client by hand | `slm-hub server add`, hot-reloaded |
+| **Health & metrics** | none | live state, p95 latency, and RAM per backend |
+| **OAuth backends** | re-authorize in every client | authorize once, token in the OS keychain |
 
 ## What you get
 
