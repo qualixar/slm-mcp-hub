@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 # Version
-VERSION = "0.2.6"
+VERSION = "0.3.0"
 
 
 def get_config_dir() -> Path:
@@ -79,3 +79,27 @@ AUDIT_RETENTION_DAYS = 30
 # MCP endpoint path
 MCP_ENDPOINT_PATH = "/mcp"
 API_PREFIX = "/api"
+
+# W4: timeout class names (mirrored in federation/timeouts.py for the registry)
+TIMEOUT_CLASS_FAST = "fast"
+TIMEOUT_CLASS_DEFAULT = "default"
+TIMEOUT_CLASS_EXTENDED = "extended"
+TIMEOUT_CLASS_UNBOUNDED = "unbounded"
+
+# W4: event store defaults (used by InMemoryEventStore / P3)
+EVENT_STORE_MAX_EVENTS = 500
+EVENT_STORE_MAX_STREAMS = 200
+EVENT_STORE_STREAM_TTL_S = 7200.0  # 2 hours — covers UNBOUNDED class calls
+
+# W4: keepalive default (EXTENDED + UNBOUNDED classes)
+KEEPALIVE_INTERVAL_S = 55.0
+
+# MCP protocol versions — single-source definition (W8-P6).
+# Referenced by http_server.py and protocol/product_operations.py.
+MCP_MODERN_PROTOCOL_VERSION = "2026-07-28"
+MCP_LEGACY_PROTOCOL_VERSIONS = frozenset({
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+})

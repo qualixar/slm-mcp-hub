@@ -12,6 +12,7 @@ from pathlib import Path
 
 import click
 
+from slm_mcp_hub.cli.auth_commands import auth as auth_group
 from slm_mcp_hub.cli.server_commands import server as server_group
 from slm_mcp_hub.cli.setup_commands import network, setup
 from slm_mcp_hub.core.config import (
@@ -133,16 +134,41 @@ def _kill_existing_hub(config_host: str, config_port: int) -> None:
 
 @cli.command()
 @click.option("--port", type=int, default=None, help="Port to listen on")
+@click.option("--host", default=None, help="Host/IP to bind (overrides config)")
 @click.option("--config", "config_path", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("--log-level", default="INFO", type=click.Choice(["DEBUG", "INFO", "WARNING", "ERROR"]))
-def start(port: int | None, config_path: Path | None, log_level: str) -> None:
+@click.option(
+    "--sdk-mode",
+    is_flag=True,
+    default=False,
+    envvar="SLM_HUB_SDK_MODE",
+    help=(
+        "Use the official MCP SDK inbound transport (mcp.server.lowlevel.Server) "
+        "instead of the hand-rolled JSON-RPC handler. "
+        "Enables MCP 2026-07-28 Streamable HTTP conformance. "
+        "Also honoured via SLM_HUB_SDK_MODE=1 env var."
+    ),
+)
+def start(
+    port: int | None,
+    host: str | None,
+    config_path: Path | None,
+    log_level: str,
+    sdk_mode: bool,
+) -> None:
     """Start the hub server. Kills any existing hub first."""
     _setup_logging(log_level)
     _load_secrets()
     config = load_config(config_path)
 
+    # Allow env var or CLI flag to enable SDK mode
+    if not sdk_mode:
+        sdk_mode = os.environ.get("SLM_HUB_SDK_MODE", "").lower() in {"1", "true", "yes", "on"}
+
     if port:
         config = replace(config, port=port)
+    if host:
+        config = replace(config, host=host)
 
     try:
         loopback = ipaddress.ip_address(config.host).is_loopback
@@ -165,6 +191,21 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
         async with HubOrchestrator(config) as hub:
             runtime = HubRuntime(hub)
 
+            # P03: SDK mode wires the official mcp.server.lowlevel.Server as the
+            # inbound transport, enabling MCP 2026-07-28 Streamable HTTP conformance.
+            sdk_server_instance = None
+            if sdk_mode:
+                from slm_mcp_hub.protocol.inbound import build_sdk_server
+                from slm_mcp_hub.protocol.product_operations import HubProductOperations
+
+                ops = HubProductOperations(
+                    registry=runtime.registry,
+                    router=runtime.router,
+                    hub=hub,
+                )
+                sdk_server_instance = build_sdk_server(ops)
+                click.echo("  SDK mode: MCP 2026-07-28 inbound transport active")
+
             app = create_app(
                 mcp_endpoint=runtime.mcp_endpoint,
                 session_manager=runtime.session_manager,
@@ -175,6 +216,8 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
                 reloader=runtime.reloader,
                 conn_manager=runtime.conn_manager,
                 api_key=hub_api_key,
+                sdk_server=sdk_server_instance,
+                metrics=runtime.metrics,  # W8-P5: wire MetricsCollector to dashboard
             )
 
             pid_file = get_pid_file()
@@ -194,9 +237,14 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
             click.echo(f"SLM MCP Hub v{VERSION} on http://{config.host}:{config.port}/mcp")
             click.echo(f"  Configured: {len(config.mcp_servers)} MCP servers, {len(hub.plugins)} plugins")
 
-            async def _connect_mcps_background() -> None:
-                failed = await runtime.connect_all()
-                click.echo(f"  Connected: {runtime.conn_manager.connected_count}/{len(config.mcp_servers)} servers, {runtime.registry.tool_count} tools")
+            # W2-P2: post_connect hook handles retry logic and status output after
+            # connect_all completes in the background.  The hub serves immediately.
+            async def _post_connect(failed: dict[str, str]) -> None:
+                click.echo(
+                    f"  Connected: {runtime.conn_manager.connected_count}/"
+                    f"{len(config.mcp_servers)} servers, "
+                    f"{runtime.registry.tool_count} tools"
+                )
                 # Fast cold-start retries (0.5s, 1.5s, 4.5s) for transient failures
                 # like child processes that need extra startup time.
                 if failed:
@@ -205,16 +253,23 @@ def start(port: int | None, config_path: Path | None, log_level: str) -> None:
                         for name, err in still_failed.items():
                             click.echo(f"  WARNING: {name}: {err}")
                     else:
-                        click.echo(f"  Connected after retries: {runtime.conn_manager.connected_count}/{len(config.mcp_servers)} servers, {runtime.registry.tool_count} tools")
+                        click.echo(
+                            f"  Connected after retries: "
+                            f"{runtime.conn_manager.connected_count}/"
+                            f"{len(config.mcp_servers)} servers, "
+                            f"{runtime.registry.tool_count} tools"
+                        )
 
-            asyncio.create_task(_connect_mcps_background())
+            # Fire-and-track: hub serves immediately; backends connect in the background.
+            runtime.start_background_connect(post_connect=_post_connect)
 
             try:
                 await server.serve()
             except asyncio.CancelledError:
                 pass
             finally:
-                await runtime.disconnect_all()
+                # Cancels background connect task (if still running), then disconnects.
+                await runtime.stop()
                 if pid_file.exists():
                     pid_file.unlink()
 
@@ -253,10 +308,10 @@ def mcp_stdio(log_level: str) -> None:
         async with HubOrchestrator(config) as hub:
             runtime = HubRuntime(hub)
 
-            # Connect federated MCPs in the background — first client request
-            # may arrive before they're all up, that's fine, hub__list_servers
-            # will reflect current state.
-            asyncio.create_task(runtime.connect_all())
+            # W2-P2: fire-and-track — hub serves immediately while backends connect
+            # in the background.  First client request may arrive before all backends
+            # are ready; hub__list_servers reflects current state at each call.
+            runtime.start_background_connect()
 
             stdio_server = StdioServer(
                 mcp_endpoint=runtime.mcp_endpoint,
@@ -269,7 +324,8 @@ def mcp_stdio(log_level: str) -> None:
             except asyncio.CancelledError:
                 pass
             finally:
-                await runtime.disconnect_all()
+                # Cancels background connect task (if still running), then disconnects.
+                await runtime.stop()
 
     try:
         asyncio.run(_run_stdio())
@@ -480,6 +536,20 @@ def config_restore(snapshot_name: str) -> None:
 cli.add_command(setup)
 cli.add_command(network)
 cli.add_command(server_group)
+cli.add_command(auth_group)
+
+# W5-P1: Observability commands — servers, health, warm, stop.
+from slm_mcp_hub.cli.observe_commands import (  # noqa: E402, PLC0415
+    health_cmd,
+    servers_cmd,
+    stop_cmd,
+    warm_cmd,
+)
+
+cli.add_command(servers_cmd)
+cli.add_command(health_cmd)
+cli.add_command(warm_cmd)
+cli.add_command(stop_cmd)
 
 
 @cli.group()
