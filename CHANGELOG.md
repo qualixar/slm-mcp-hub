@@ -5,6 +5,22 @@ All notable changes to SLM MCP Hub will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-08-05
+
+### Fixed
+
+- CLI management commands now authenticate against auth-enabled hubs. When
+  `SLM_HUB_API_KEY` is set, `slm-hub tools`, `status --verbose`, `reconnect`,
+  the `server` subcommands (`list`, `reload`, `add`, `remove`, `modify`,
+  `status`), and the observability commands (`servers`, `health`, `warm`,
+  `stop`) attach the `X-SLM-Hub-API-Key` header the hub requires. Previously
+  these issued unauthenticated requests and returned `401 Unauthorized` on any
+  deployment with hub auth enabled — only `status` (which hits the exempt
+  `/api/health` endpoint) worked. Base-URL and header resolution are now
+  centralised in `slm_mcp_hub.cli.api_client`. ([#29])
+
+[#29]: https://github.com/qualixar/slm-mcp-hub/issues/29
+
 ## [0.3.0] - 2026-08-05
 
 Universal MCP hub: federate stdio, HTTP, and SSE servers — including

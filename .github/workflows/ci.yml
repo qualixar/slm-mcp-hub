@@ -58,12 +58,12 @@ jobs:
         run: |
           python -m venv /tmp/slm-wheel-check
           /tmp/slm-wheel-check/bin/pip install dist/*.whl
-          test "$(/tmp/slm-wheel-check/bin/slm-hub --version | awk '{print $NF}')" = "0.3.0"
+          test "$(/tmp/slm-wheel-check/bin/slm-hub --version | awk '{print $NF}')" = "0.3.1"
       - name: Verify npm shim against the built wheel
         run: |
           npm pack
-          SLM_HUB_PYTHON_REQUIREMENT="$(pwd)/$(find dist -name '*.whl' -print -quit)" npm install -g ./slm-mcp-hub-0.3.0.tgz
-          test "$(slm-hub --version | awk '{print $NF}')" = "0.3.0"
+          SLM_HUB_PYTHON_REQUIREMENT="$(pwd)/$(find dist -name '*.whl' -print -quit)" npm install -g ./slm-mcp-hub-0.3.1.tgz
+          test "$(slm-hub --version | awk '{print $NF}')" = "0.3.1"
 
   dependency-review:
     if: github.event_name == 'pull_request'
