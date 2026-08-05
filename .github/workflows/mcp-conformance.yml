@@ -27,7 +27,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --frozen
+        run: python -m pip install -e ".[network]"
 
       - name: Set up Node (for conformance harness)
         uses: actions/setup-node@v4
@@ -47,7 +47,7 @@ jobs:
 
           # NOTE: the command is `start` (not `serve`). `--sdk-mode` activates the
           # official mcp.server.lowlevel.Server transport (MCP 2026-07-28).
-          uv run python -m slm_mcp_hub.cli.main start \
+          python -m slm_mcp_hub.cli.main start \
             --host 127.0.0.1 \
             --port 18765 \
             --sdk-mode \
