@@ -17,13 +17,12 @@ from __future__ import annotations
 import click
 import httpx
 
+from slm_mcp_hub.cli.api_client import hub_headers, hub_url
+
 
 def _hub_url() -> str:
     """Return the hub base URL from config (e.g. 'http://127.0.0.1:8765')."""
-    from slm_mcp_hub.core.config import load_config
-
-    cfg = load_config()
-    return f"http://{cfg.host}:{cfg.port}"
+    return hub_url()
 
 
 def _fmt_uptime(seconds: float) -> str:
@@ -55,10 +54,11 @@ def servers_cmd(as_json: bool) -> None:
     Falls back to /api/servers/detail (existing) if enriched endpoint unavailable.
     """
     url = _hub_url()
+    headers = hub_headers()
     try:
-        resp = httpx.get(f"{url}/api/servers/enriched", timeout=10.0)
+        resp = httpx.get(f"{url}/api/servers/enriched", headers=headers, timeout=10.0)
         if resp.status_code == 404:
-            resp = httpx.get(f"{url}/api/servers/detail", timeout=10.0)
+            resp = httpx.get(f"{url}/api/servers/detail", headers=headers, timeout=10.0)
         resp.raise_for_status()
     except httpx.ConnectError:
         click.echo("Hub is not running. Start with: slm-hub start")
@@ -114,10 +114,11 @@ def health_cmd(show_all: bool) -> None:
     Exits with code 0 when all servers are connected and healthy.
     """
     url = _hub_url()
+    headers = hub_headers()
     try:
-        resp = httpx.get(f"{url}/api/servers/enriched", timeout=10.0)
+        resp = httpx.get(f"{url}/api/servers/enriched", headers=headers, timeout=10.0)
         if resp.status_code == 404:
-            resp = httpx.get(f"{url}/api/servers/detail", timeout=10.0)
+            resp = httpx.get(f"{url}/api/servers/detail", headers=headers, timeout=10.0)
         resp.raise_for_status()
     except httpx.ConnectError:
         click.echo("Hub is not running. Start with: slm-hub start")
@@ -165,6 +166,7 @@ def warm_cmd(server_name: str) -> None:
     try:
         resp = httpx.post(
             f"{url}/api/servers/{server_name}/warm",
+            headers=hub_headers(),
             timeout=60.0,
         )
         data = resp.json()
@@ -194,6 +196,7 @@ def stop_cmd(server_name: str, force: bool) -> None:
     try:
         resp = httpx.post(
             f"{url}/api/servers/{server_name}/stop",
+            headers=hub_headers(),
             timeout=30.0,
         )
         data = resp.json()

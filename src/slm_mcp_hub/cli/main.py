@@ -12,6 +12,7 @@ from pathlib import Path
 
 import click
 
+from slm_mcp_hub.cli.api_client import hub_headers
 from slm_mcp_hub.cli.auth_commands import auth as auth_group
 from slm_mcp_hub.cli.server_commands import server as server_group
 from slm_mcp_hub.cli.setup_commands import network, setup
@@ -352,6 +353,7 @@ def status(verbose: bool) -> None:
         try:
             resp = httpx.get(
                 f"http://{config.host}:{config.port}/api/health",
+                headers=hub_headers(),
                 timeout=5.0,
             )
             health = resp.json()
@@ -367,6 +369,7 @@ def status(verbose: bool) -> None:
                 try:
                     detail_resp = httpx.get(
                         f"http://{config.host}:{config.port}/api/servers/detail",
+                        headers=hub_headers(),
                         timeout=5.0,
                     )
                     servers = detail_resp.json().get("servers", [])
@@ -410,6 +413,7 @@ def reconnect(server_name: str) -> None:
         config = load_config()
         resp = httpx.post(
             f"http://{config.host}:{config.port}/api/servers/{server_name}/reconnect",
+            headers=hub_headers(),
             timeout=60.0,
         )
         data = resp.json()
@@ -648,6 +652,7 @@ def tools_cmd(query: str) -> None:
     try:
         resp = httpx.get(
             f"http://{config.host}:{config.port}/api/servers/detail",
+            headers=hub_headers(),
             timeout=10.0,
         )
         resp.raise_for_status()

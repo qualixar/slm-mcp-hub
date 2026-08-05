@@ -2,47 +2,52 @@
 
 [![PyPI](https://img.shields.io/pypi/v/slm-mcp-hub)](https://pypi.org/project/slm-mcp-hub/)
 [![npm](https://img.shields.io/npm/v/slm-mcp-hub)](https://www.npmjs.com/package/slm-mcp-hub)
-[![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
+[![CI](https://github.com/qualixar/slm-mcp-hub/actions/workflows/ci.yml/badge.svg)](https://github.com/qualixar/slm-mcp-hub/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://pypi.org/project/slm-mcp-hub/)
+[![MCP](https://img.shields.io/badge/MCP-2026--07--28-6f42c1)](https://modelcontextprotocol.io)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
 [![Status](https://img.shields.io/badge/status-alpha-orange)](https://github.com/qualixar/slm-mcp-hub/issues)
 
-A local-first MCP gateway that connects once to all your MCP backends and exposes them through a single endpoint. Part of Qualixar's work on AI Reliability Engineering.
+**One local endpoint in front of every MCP server you run.** Connect your AI
+clients to the hub once; the hub connects to your backends once, shares them
+across every session, and adds governance, observability, and reliability on
+top. Part of Qualixar's work on AI Reliability Engineering.
 
-**Alpha software.** File reproducible failures through [GitHub Issues](https://github.com/qualixar/slm-mcp-hub/issues).
+> **Alpha software.** The interfaces work and are tested, but they can still
+> change between releases. Please file reproducible failures through
+> [GitHub Issues](https://github.com/qualixar/slm-mcp-hub/issues).
 
-## The problem it solves
+## Why
 
-Without a hub, every AI client session spawns its own MCP subprocesses. Five sessions with 38 configured servers means 190 processes and roughly 10 GB of RAM. The hub runs those processes once, shares them across every connected client, and adds governance, observability, and reliability on top.
+Every AI client that speaks MCP spawns its own copy of every server it uses.
+Run a few sessions and the math turns ugly fast:
 
-## What ships in v0.3.0
+```
+      Without a hub                              With SLM MCP Hub
 
-### Unified call pipeline
+  client 1 ─► 38 subprocesses           client 1 ─┐
+  client 2 ─► 38 subprocesses           client 2 ─┤
+  client 3 ─► 38 subprocesses           client 3 ─┼─► hub ─► 38 shared backends
+  client 4 ─► 38 subprocesses           client 4 ─┤        one endpoint,
+  client 5 ─► 38 subprocesses           client 5 ─┘        one process pool
 
-Every tool call flows through one dispatch path. A per-backend concurrency gate (default 10 concurrent calls per backend) prevents one slow server from blocking calls to the others. Per-server timeout classes — `fast` (30 s), `default` (120 s), `extended` (600 s), `unbounded` — let a long-running server finish without cutting off the call at a flat ceiling. Backend `notifications/progress` are forwarded to the hub's client in real time on both transport modes. Per-server p95 latency and call metrics are recorded on every dispatch.
+  = 190 processes, ~10 GB RAM           = 38 processes, shared by everyone
+```
 
-### Transport: stateless default, stateful opt-in
+The hub runs each backend once, multiplexes every client through a single
+endpoint, and keeps memory bounded while your tools stay one call away.
 
-The default run mode is modern stateless MCP `2026-07-28`: no session tracking, no event store, no resumable replay. This is the right default for most deployments — stateless means the hub can restart cleanly with no session state to recover.
+## What you get
 
-Set `SLM_HUB_STATEFUL=1` (or `transport_stateful: true` in config) to enable stateful sessions. Stateful mode activates resumable streaming: the SDK's `InMemoryEventStore` handles client↔hub `Last-Event-ID` stream resumption automatically. On the hub→backend leg, a safe one-shot retry fires when a backend drops mid-stream — but only when the backend had already issued a resumption token, meaning it can continue from that point rather than restart. A connection drop without a token fails cleanly; the call is not retried.
-
-Resumable streaming is a stateful-mode feature. In the default stateless mode there is no resumption, by design.
-
-### Observability
-
-`GET /api/servers/enriched` reports each backend's live state, uptime, restart count, and tool count. `GET /api/events` streams lifecycle events over SSE without a slow reader ever stalling the hub. A localhost admin dashboard renders the same data in a browser. Runtime CLI commands: `slm-hub servers`, `slm-hub health`, `slm-hub warm <server>`, `slm-hub stop <server>`. All admin routes require the hub API key.
-
-### RAM governance
-
-Lazy spawn harvests a backend's tools at startup and starts its subprocess only when the first call arrives. Idle eviction shuts a backend down once it has been idle past `idle_ttl_seconds`, freeing the process while its tools stay discoverable and callable — the next routed call reconnects it transparently. An LRU cap evicts the least-recently-used non-pinned backend when the live process count hits `max_live_backends`. Mark a server `always_on` (or `spawn: pinned`) to keep it hot.
-
-### Transport completeness
-
-Backends connect over stdio, Streamable HTTP, SSE, or OAuth 2.0-protected HTTP (authorize once with `slm-hub auth login`; tokens stored in the OS keychain). Downstream clients connect over Streamable HTTP or native stdio. The combination of SSE backend and OAuth is rejected at configuration time.
-
-### Federation
-
-Three meta-tools — `search_tools`, `call_tool`, `list_servers` — let any client discover and invoke any tool across all connected backends through a single hub entry. Tools are namespaced as `server__tool`. Backward-compatible `hub__` prefix aliases are accepted.
+| | |
+|---|---|
+| **One connection, every backend** | Point a client at the hub once and reach every configured server through three meta-tools — no per-client server list to maintain. |
+| **Shared process pool** | Backends start once and are shared across all client sessions instead of being re-spawned per session. |
+| **RAM governance** | Lazy spawn, idle eviction, and an LRU cap on live backends keep memory bounded. Evicted backends stay discoverable and reconnect on the next call. |
+| **Unified call pipeline** | Every call takes one path: a per-backend concurrency gate, per-server timeout classes, live progress forwarding, and p95 metrics on every dispatch. |
+| **Every transport** | stdio, Streamable HTTP, SSE, and OAuth 2.0-protected HTTP backends, all behind one endpoint. |
+| **Observability** | Live per-backend state, uptime, restarts, p95 latency, and RAM over REST, an SSE event stream, a localhost dashboard, and the CLI. |
+| **Secure by default** | Loopback-only unless you set an API key; OAuth tokens in the OS keychain; secrets never land in logs or config. |
 
 ## Install
 
@@ -52,26 +57,32 @@ Python 3.11 or newer.
 pip install slm-mcp-hub
 ```
 
-The npm shim installs the matching Python release into an isolated environment it owns:
+Or via npm — the shim installs the matching Python release into an isolated
+environment it owns:
 
 ```bash
 npm install -g slm-mcp-hub
 ```
 
-The two packages are release-locked. Installation fails rather than falling back to a mismatched version or modifying an externally managed Python install.
+The two packages are release-locked. Installation fails loudly rather than
+falling back to a mismatched version or modifying an externally managed Python.
 
 ## Quick start
 
 ```bash
-slm-hub config init
-slm-hub setup detect
-slm-hub setup import ~/.claude.json
-slm-hub start
+slm-hub config init                     # write a default config
+slm-hub setup detect                    # find MCP servers already on this machine
+slm-hub setup import ~/.claude.json     # import them into the hub
+slm-hub start                           # run the hub
 ```
 
-Default HTTP endpoint: `http://127.0.0.1:52414/mcp`. Health check: `http://127.0.0.1:52414/api/health`.
+The hub is now serving every imported backend at one endpoint:
 
-Native stdio, for clients that launch MCP servers as subprocesses:
+- **HTTP:** `http://127.0.0.1:52414/mcp`
+- **Health:** `http://127.0.0.1:52414/api/health`
+- **Dashboard:** `http://127.0.0.1:52414/`
+
+Point a client at it over native stdio:
 
 ```json
 {
@@ -84,27 +95,84 @@ Native stdio, for clients that launch MCP servers as subprocesses:
 }
 ```
 
+Confirm what's connected:
+
+```bash
+slm-hub servers        # live table: state, uptime, restarts, p95, RAM, tools
+slm-hub tools          # every tool reachable through the hub
+```
+
 ## Routing modes
 
-**Federated mode** exposes three meta-tools. One hub entry in your client config, three tools to reach everything:
+**Federated** — one hub entry in your client config exposes three meta-tools
+(`search_tools`, `call_tool`, `list_servers`) that reach everything. Best when
+context size matters:
 
 ```bash
 slm-hub setup register --client claude_code --mode federated
 ```
 
-**Transparent mode** gives each backend its own route at `/mcp/{server-name}`. Original tool names, zero behavior change — useful for migration testing or clients that need the backend's native tool surface:
+**Transparent** — each backend keeps its own route at `/mcp/{server-name}` with
+its original tool names and zero behavior change. Best for migration testing or
+clients that need a backend's native tool surface:
 
 ```bash
 slm-hub setup register --client claude_code --mode transparent
 ```
 
-Use federated mode when context size matters. Use transparent mode when a client requires the backend's original tool names or when you are testing before a full migration.
+## How it works
 
-## Transport mode
+### Unified call pipeline
 
-The default is stateless. Stateless means no session IDs, no server-side event store, and no resumable streaming — and also no session state to manage or recover.
+Every tool call flows through one dispatch path. A per-backend concurrency gate
+(default 10 concurrent calls per backend) stops one slow server from blocking
+calls to the others. Per-server timeout classes — `fast` (30 s), `default`
+(120 s), `extended` (600 s), `unbounded` — let a long-running server finish
+instead of being cut off at a flat ceiling. Backend `notifications/progress`
+are forwarded to the hub's client in real time on both transport modes, and
+per-server p95 latency and call metrics are recorded on every dispatch.
 
-Enable stateful sessions when you need resumable streaming:
+### RAM governance
+
+Lazy spawn harvests a backend's tools at startup and starts its subprocess only
+when the first call arrives. Idle eviction shuts a backend down once it has been
+idle past `idle_ttl_seconds`, freeing the process while its tools stay
+discoverable and callable — the next routed call reconnects it transparently.
+An LRU cap evicts the least-recently-used non-pinned backend when the live
+process count hits `max_live_backends`. Mark a server `always_on` (or
+`spawn: pinned`) to keep it hot.
+
+### Transport completeness
+
+Backends connect over stdio, Streamable HTTP, SSE, or OAuth 2.0-protected HTTP
+(authorize once with `slm-hub auth login`; tokens stored in the OS keychain).
+Downstream clients connect over Streamable HTTP or native stdio. The
+combination of an SSE backend and OAuth is rejected at configuration time.
+
+### Federation
+
+Three meta-tools — `search_tools`, `call_tool`, `list_servers` — let any client
+discover and invoke any tool across all connected backends through a single hub
+entry. Tools are namespaced as `server__tool`. Backward-compatible `hub__`
+prefix aliases are accepted.
+
+### Observability
+
+`GET /api/servers/enriched` reports each backend's live state, uptime, restart
+count, p95 latency, RAM, and tool count. `GET /api/events` streams lifecycle
+events over SSE without a slow reader ever stalling the hub. A localhost admin
+dashboard renders the same data in a browser. Runtime CLI: `slm-hub servers`,
+`slm-hub health`, `slm-hub warm <server>`, `slm-hub stop <server>`. All
+management routes require the hub API key when one is set.
+
+## Transport mode: stateless by default
+
+The default run mode is modern stateless MCP `2026-07-28` — no session IDs, no
+server-side event store, no resumable streaming, and so no session state to
+manage or recover. This is the right default for most deployments: the hub
+restarts cleanly with nothing to rebuild.
+
+Enable stateful sessions only when you need resumable streaming:
 
 ```bash
 export SLM_HUB_STATEFUL=1
@@ -114,16 +182,21 @@ slm-hub start
 Or in `config.json`:
 
 ```json
-{
-  "transport_stateful": true
-}
+{ "transport_stateful": true }
 ```
 
-**Resumable streaming** is only available in stateful mode. On the client↔hub leg, the SDK handles `Last-Event-ID` reconnection through `InMemoryEventStore` automatically. On the hub→backend leg, a one-shot retry fires if and only if the backend issued a resumption token before the connection dropped. Without a token, the call fails cleanly — the hub does not blindly re-execute a tool whose idempotency is unknown.
+**Resumable streaming is a stateful-mode feature.** On the client↔hub leg, the
+SDK handles `Last-Event-ID` reconnection through `InMemoryEventStore`
+automatically. On the hub→backend leg, a one-shot retry fires **if and only if**
+the backend issued a resumption token before the connection dropped — so the
+call continues from that point rather than restarting. A drop without a token
+fails cleanly; the hub never blindly re-executes a tool whose idempotency is
+unknown. In the default stateless mode there is no resumption, by design.
 
 ## Configuration
 
-Default file: `~/.slm-mcp-hub/config.json`. Set `SLM_HUB_CONFIG_DIR` to move the full runtime directory, including config, database, PID, log, and snapshots.
+Default file: `~/.slm-mcp-hub/config.json`. Set `SLM_HUB_CONFIG_DIR` to move the
+whole runtime directory (config, database, PID, log, and snapshots) at once.
 
 ```json
 {
@@ -134,17 +207,13 @@ Default file: `~/.slm-mcp-hub/config.json`. Set `SLM_HUB_CONFIG_DIR` to move the
     "github": {
       "command": "npx",
       "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": {
-        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
-      },
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}" },
       "timeout_class": "default"
     },
     "deep-research": {
       "type": "http",
       "url": "${RESEARCH_MCP_URL}",
-      "headers": {
-        "Authorization": "Bearer ${RESEARCH_MCP_TOKEN}"
-      },
+      "headers": { "Authorization": "Bearer ${RESEARCH_MCP_TOKEN}" },
       "timeout_class": "extended"
     },
     "remote-oauth": {
@@ -184,10 +253,14 @@ JSON comments are not supported.
 | `SLM_HUB_HOST` | HTTP bind host. |
 | `SLM_HUB_PORT` | HTTP bind port. |
 | `SLM_HUB_LOG_LEVEL` | Logging level. |
-| `SLM_HUB_API_KEY` | Required for non-loopback binds; authenticates MCP and all management routes. |
+| `SLM_HUB_API_KEY` | Required for non-loopback binds; authenticates MCP, transparent proxy, and all management routes. The CLI reads it from the environment and sends it automatically. |
 | `SLM_HUB_STATEFUL` | Set to `1` to enable stateful sessions and resumable streaming. Default is stateless. |
 
-Secret values go in `~/.slm-mcp-hub/secrets.env` or `~/.claude-secrets.env`. `${VAR}` placeholders in config resolve only when a backend connection starts; the hub persists the placeholder, not the resolved value. If an older release wrote a literal secret into config, rotate that credential and remove the contaminated file manually.
+Secret values go in `~/.slm-mcp-hub/secrets.env` or `~/.claude-secrets.env`.
+`${VAR}` placeholders in config resolve only when a backend connection starts;
+the hub persists the placeholder, never the resolved value. If an older release
+wrote a literal secret into config, rotate that credential and remove the
+contaminated file manually.
 
 ### Safe changes and recovery
 
@@ -199,42 +272,29 @@ slm-hub config snapshots
 slm-hub config restore <snapshot-name>
 ```
 
-Config writes are atomic. Existing non-trivial configs are snapshotted before any write. A large unexpected server-count drop is refused unless explicitly forced.
+Config writes are atomic. Existing non-trivial configs are snapshotted before
+any write. A large, unexpected drop in server count is refused unless explicitly
+forced.
 
-## Authentication
+## Authentication (upstream OAuth)
 
 OAuth 2.0-protected upstream servers authorize once per server:
 
 ```bash
-slm-hub auth login SERVER      # opens browser once to authorize
+slm-hub auth login SERVER      # opens a browser once to authorize
 slm-hub auth status [SERVER]   # metadata only — never prints a token
 slm-hub auth status --json
 slm-hub auth logout SERVER
 ```
 
-Tokens are stored in the OS keychain via `keyring` — a working keychain backend is required. `login` is the only command that opens a browser. No command prints an access token, refresh token, client secret, or authorization code. A downstream client's `Authorization` header is never forwarded to an upstream server; the hub uses only its own stored token for upstream connections.
-
-OAuth metadata and callback URLs are restricted to HTTPS or loopback HTTP. Private, reserved, and link-local IP addresses are blocked, with DNS-rebinding checks across all resolved IPs.
-
-## SuperLocalMemory
-
-Run the SLM daemon as its own process, then enable the direct hub plugins:
-
-```json
-{
-  "plugins_enabled": ["slm", "mesh"]
-}
-```
-
-```bash
-export SLM_DAEMON_URL=http://127.0.0.1:8765
-export SLM_API_KEY='your-daemon-api-key'
-slm-hub start
-```
-
-`SLM_API_KEY` is sent as `X-SLM-API-Key` by both the SLM and mesh plugins. Authentication failures disable the affected plugin and remain visible in logs — the key is never logged. Restart the hub after rotating the daemon key.
-
-Do not add the SLM daemon under `mcpServers` when using these plugins. That creates a nested topology that is not the supported integration path.
+Tokens are stored in the OS keychain via `keyring` — a working keychain backend
+is required. `login` is the only command that opens a browser. No command ever
+prints an access token, refresh token, client secret, or authorization code. A
+downstream client's `Authorization` header is never forwarded upstream; the hub
+uses only its own stored token for upstream connections. OAuth metadata and
+callback URLs are restricted to HTTPS or loopback HTTP, with private, reserved,
+and link-local addresses blocked and DNS-rebinding checks across all resolved
+IPs.
 
 ## Remote access security
 
@@ -246,11 +306,39 @@ export SLM_HUB_API_KEY='generate-a-long-random-value'
 slm-hub start
 ```
 
-Clients send the key in `X-SLM-Hub-API-Key` or `Authorization: Bearer <key>`. Authentication covers `/mcp`, transparent proxy routes, and all management APIs. `/api/health` remains available without a key for infrastructure probes. Use TLS at the network boundary whenever traffic leaves the host.
+Clients send the key in `X-SLM-Hub-API-Key` or `Authorization: Bearer <key>`.
+Authentication covers `/mcp`, the transparent proxy routes, and all management
+APIs; the CLI attaches the key from the environment on your behalf. `/api/health`
+stays open without a key for infrastructure probes. Use TLS at the network
+boundary whenever traffic leaves the host.
+
+## SuperLocalMemory
+
+Run the SLM daemon as its own process, then enable the direct hub plugins:
+
+```json
+{ "plugins_enabled": ["slm", "mesh"] }
+```
+
+```bash
+export SLM_DAEMON_URL=http://127.0.0.1:8765
+export SLM_API_KEY='your-daemon-api-key'
+slm-hub start
+```
+
+`SLM_API_KEY` is sent as `X-SLM-API-Key` by both the SLM and mesh plugins. An
+authentication failure disables the affected plugin and stays visible in logs —
+the key itself is never logged. Restart the hub after rotating the daemon key.
+Do not also add the SLM daemon under `mcpServers`; that creates a nested
+topology that is not the supported integration path.
 
 ## Protocol conformance
 
-The hub targets MCP `2026-07-28`. Its own interface is the three meta-tools (`search_tools`, `call_tool`, `list_servers`); upstream tool names are not re-listed at `tools/list`. Upstream capabilities are exercised through `call_tool` across the full transport matrix: stdio, Streamable HTTP, SSE, and OAuth-protected HTTP backends.
+The hub targets MCP `2026-07-28`. Its own interface is the three meta-tools
+(`search_tools`, `call_tool`, `list_servers`); upstream tool names are not
+re-listed at `tools/list`. Upstream capabilities are exercised through
+`call_tool` across the full transport matrix: stdio, Streamable HTTP, SSE, and
+OAuth-protected HTTP backends.
 
 ## Development and verification
 
@@ -261,14 +349,19 @@ python -m venv .venv
 npm test
 ```
 
-The release gate requires more than 97% Python line coverage, clean linting, wheel and sdist package inspection, isolated install tests, dependency audits, and supported-Python CI.
-
-Architecture, configuration, migration, and getting-started details are in the [docs directory](docs/).
+The release gate requires more than 97% Python line coverage, clean linting,
+wheel and sdist package inspection, isolated install tests, dependency audits,
+and CI across every supported Python version. Architecture, configuration,
+migration, and getting-started guides live in the
+[docs directory](docs/).
 
 ## Contributing
 
-Bug reports are most useful with a reproduction test. Pull requests must keep both distribution channels version-aligned and pass all release gates. See [CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
+Bug reports are most useful with a reproduction test. Pull requests must keep
+both distribution channels version-aligned and pass every release gate. See
+[CONTRIBUTING.md](CONTRIBUTING.md) and [SECURITY.md](SECURITY.md).
 
 ## License
 
-AGPL-3.0-or-later for open-source use. Commercial licenses are available — see [LICENSE](LICENSE) or contact the Qualixar team.
+AGPL-3.0-or-later for open-source use. Commercial licenses are available — see
+[LICENSE](LICENSE) or contact the Qualixar team.

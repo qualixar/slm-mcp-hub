@@ -13,6 +13,7 @@ from dataclasses import replace as dc_replace
 
 import click
 
+from slm_mcp_hub.cli.api_client import hub_headers, hub_url
 from slm_mcp_hub.core.config import (
     MCPServerConfig,
     load_config,
@@ -21,15 +22,16 @@ from slm_mcp_hub.core.config import (
 
 
 def _hub_url() -> str:
-    cfg = load_config()
-    return f"http://{cfg.host}:{cfg.port}"
+    return hub_url()
 
 
 def _post_reload() -> dict:
     """POST /api/reload to the running hub. Returns the JSON response."""
     import httpx
     try:
-        resp = httpx.post(f"{_hub_url()}/api/reload", timeout=120.0)
+        resp = httpx.post(
+            f"{_hub_url()}/api/reload", headers=hub_headers(), timeout=120.0
+        )
         return resp.json()
     except httpx.ConnectError:
         return {"success": False, "error": "Hub is not running"}
@@ -41,7 +43,9 @@ def _get_status_detail() -> dict:
     """GET /api/servers/detail from the running hub."""
     import httpx
     try:
-        resp = httpx.get(f"{_hub_url()}/api/servers/detail", timeout=10.0)
+        resp = httpx.get(
+            f"{_hub_url()}/api/servers/detail", headers=hub_headers(), timeout=10.0
+        )
         return resp.json()
     except httpx.ConnectError:
         return {"servers": None, "error": "Hub is not running"}
