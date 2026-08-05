@@ -1,99 +1,104 @@
-"""MCP connection manager — manages one MCP server connection."""
+"""MCP connection manager — manages one MCP server connection.
+
+The upstream transport is handled exclusively by OutboundClient, which wraps
+the official ``mcp`` SDK ``Client(mode="auto")`` for both stdio and Streamable
+HTTP upstreams.  All hand-rolled JSON-RPC machinery (subprocess management,
+pending-future maps, session-header logic, SSE/JSON parsing) has been removed.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import os
 import time
-from collections import deque
+from collections.abc import Awaitable, Callable
 from enum import Enum
 from typing import Any
 
-from slm_mcp_hub.core.config import MCPServerConfig, materialize_server_config
-from slm_mcp_hub.core.constants import (
-    MCP_REQUEST_TIMEOUT_MS,
-    VERSION,
-)
+from slm_mcp_hub.auth.broker import OAuthAuthRequiredError
+from slm_mcp_hub.core.config import MCPServerConfig
+from slm_mcp_hub.protocol.models import NegotiatedPeer
+from slm_mcp_hub.protocol.outbound import OutboundClient
+from slm_mcp_hub.resilience.lifecycle import LifecycleEvent, is_valid_transition
 
 logger = logging.getLogger(__name__)
 
-_INHERITED_ENV_KEYS = (
-    "APPDATA",
-    "COMSPEC",
-    "HOME",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "LOCALAPPDATA",
-    "PATH",
-    "PATHEXT",
-    "SHELL",
-    "SYSTEMROOT",
-    "TEMP",
-    "TMP",
-    "TMPDIR",
-    "USERPROFILE",
-    "WINDIR",
-)
-
 
 class ConnectionState(str, Enum):
+    # ------------------------------------------------------------------
+    # Legacy states — kept exactly as-is; ALL existing semantics preserved.
+    # ------------------------------------------------------------------
     DISCONNECTED = "disconnected"
     CONNECTING = "connecting"
     CONNECTED = "connected"
     DRAINING = "draining"
     ERROR = "error"
+    AUTH_REQUIRED = "auth_required"
+
+    # ------------------------------------------------------------------
+    # W1-P1 additive lifecycle states (LLD §2)
+    # Used by the W1-P2 supervisor; not yet traversed by legacy code paths.
+    # ------------------------------------------------------------------
+    STARTING = "starting"
+    INITIALIZING = "initializing"
+    READY = "ready"
+    DEGRADED = "degraded"
+    RECONNECTING = "reconnecting"
+    CIRCUIT_OPEN = "circuit_open"
+    STOPPED = "stopped"
+    FAILED = "failed"
 
 
 class MCPConnection:
-    """Manages a single MCP server connection (stdio or HTTP).
+    """Manages a single MCP server connection (stdio or Streamable HTTP).
 
-    For stdio: spawns a child process, communicates via JSON-RPC over stdin/stdout.
-    For HTTP/SSE: connects to a remote URL (future phase).
+    Delegates all upstream transport to :class:`OutboundClient`, which uses the
+    official MCP SDK ``Client(mode="auto")``.  The public interface (connect,
+    disconnect, drain_and_disconnect, call_tool, read_resource, get_prompt) is
+    unchanged from prior versions.
+
+    ``_in_flight`` tracks requests currently executing via the SDK path so that
+    ``drain_and_disconnect`` can wait for them to complete before tearing down.
     """
 
     def __init__(self, config: MCPServerConfig) -> None:
         self._config = config
         self._state = ConnectionState.DISCONNECTED
-        self._process: asyncio.subprocess.Process | None = None
         self._capabilities: dict[str, Any] = {
             "tools": [],
             "resources": [],
             "resource_templates": [],
             "prompts": [],
         }
-        # Capabilities the server advertised in its initialize response, used to
-        # gate optional resources/prompts discovery probes. None means "not
-        # captured" (e.g. direct unit-test calls), in which case we fall back to
-        # probing everything for backward compatibility.
-        self._server_capabilities: dict[str, Any] | None = None
-        self._request_id = 0
-        self._pending: dict[int, asyncio.Future[dict]] = {}
-        self._reader_task: asyncio.Task | None = None
-        self._stderr_task: asyncio.Task | None = None
-        self._http_client: Any = None
-        self._http_url = ""
-        self._http_session_id: str | None = None
         self._connected_at: float = 0.0
+        # In-flight request counter for drain semantics.
         self._in_flight: int = 0
+        # Set when drain_and_disconnect is waiting for _in_flight to reach 0.
         self._drain_event: asyncio.Event | None = None
-        # Serializes drain_and_disconnect calls per connection — prevents
-        # concurrent drains from overwriting each other's _drain_event
-        # and hanging the first caller until timeout.
+        # Serializes concurrent drain_and_disconnect calls per connection.
         self._drain_lock: asyncio.Lock | None = None
-        # Rolling tail of recent stderr lines for diagnostic error messages
-        # when a child process exits unexpectedly.
-        self._stderr_tail: deque[str] = deque(maxlen=20)
-        self._stderr_output_seen = False
+        # SDK-backed outbound client (set by connect(); None until then).
+        self._outbound: OutboundClient | None = None
+
+        # W1-P4: multi-subscriber fan-out event bus.
+        # Replaces the single-slot on_event callback (W1-P1).
+        # Use subscribe() for new code; on_event property retained for back-compat.
+        self._subscribers: dict[int, Callable[[LifecycleEvent], None]] = {}
+        self._next_sub_id: int = 0
+        # Tracks the subscriber ID registered via the on_event property setter
+        # so reassignment/removal correctly replaces only the primary slot.
+        self._primary_sub_id: int | None = None
+
+    # ------------------------------------------------------------------
+    # Properties
+    # ------------------------------------------------------------------
 
     @property
     def name(self) -> str:
         return self._config.name
 
     @property
-    def state(self) -> str:
+    def state(self) -> ConnectionState:
         return self._state
 
     @property
@@ -113,71 +118,364 @@ class MCPConnection:
         return self._in_flight
 
     @property
+    def is_auth_required(self) -> bool:
+        return self._state == ConnectionState.AUTH_REQUIRED
+
+    @property
+    def negotiated_peer(self) -> NegotiatedPeer | None:
+        """Protocol peer negotiated by the SDK during connect().
+
+        Returns None for connections not yet established.
+        """
+        if self._outbound is not None:
+            return self._outbound.negotiated_peer
+        return None
+
+    @property
     def uptime_seconds(self) -> float:
         if self._connected_at == 0:
             return 0.0
         return time.time() - self._connected_at
 
+    @property
+    def process_pid(self) -> int | None:
+        """Return subprocess PID for stdio backends via OutboundClient.
+
+        Delegates to OutboundClient.process_pid. Returns None when:
+        - not connected (_outbound is None)
+        - HTTP/SSE transport (no subprocess)
+        - psutil unavailable or SDK internals changed
+
+        W5-P1 addition for RAM measurement via psutil.
+        """
+        if self._outbound is None:
+            return None
+        return self._outbound.process_pid
+
+    # ------------------------------------------------------------------
+    # W1-P4 — multi-subscriber fan-out (back-compat on_event property)
+    # ------------------------------------------------------------------
+
+    @property
+    def on_event(self) -> Callable[[LifecycleEvent], None] | None:
+        """Back-compat: return the primary subscriber or ``None``.
+
+        Existing code that reads ``conn.on_event`` to check whether a callback
+        is installed continues to work.  Returns the callable that was last
+        assigned via the setter, or ``None`` if no primary subscriber is set.
+
+        New code should use :meth:`subscribe` directly.
+        """
+        if self._primary_sub_id is not None:
+            return self._subscribers.get(self._primary_sub_id)
+        return None
+
+    @on_event.setter
+    def on_event(
+        self, cb: Callable[[LifecycleEvent], None] | None
+    ) -> None:
+        """Back-compat: register or replace the primary subscriber.
+
+        Assigning a callable registers it as the "primary" subscriber slot.
+        A subsequent assignment replaces the previous primary without affecting
+        any other subscribers registered via :meth:`subscribe`.
+        Assigning ``None`` removes the primary subscriber.
+
+        W1-P4 migration note: the supervisor now uses :meth:`subscribe` so its
+        drop-watch coexists with the event bus (the previous ``on_event``
+        assignment silently replaced all prior listeners — the single-slot
+        limitation tracked in the W1-P2 review).
+        """
+        # Remove the existing primary subscriber (if any)
+        if self._primary_sub_id is not None:
+            self._subscribers.pop(self._primary_sub_id, None)
+            self._primary_sub_id = None
+
+        if cb is not None:
+            self._primary_sub_id = self._next_sub_id
+            self._next_sub_id += 1
+            self._subscribers[self._primary_sub_id] = cb
+
+    def subscribe(
+        self, cb: Callable[[LifecycleEvent], None]
+    ) -> Callable[[], None]:
+        """Register *cb* as a subscriber for lifecycle events on this connection.
+
+        All registered subscribers receive every event emitted by
+        :meth:`_transition`.  A raising subscriber is caught and logged;
+        it cannot break the lifecycle path or other subscribers.
+
+        Parameters
+        ----------
+        cb:
+            Synchronous callable accepting a single :class:`LifecycleEvent`.
+
+        Returns
+        -------
+        Callable[[], None]
+            An unsubscribe callable.  Call it once to remove *cb* from the
+            subscriber set.  Idempotent — subsequent calls are no-ops.
+        """
+        sub_id = self._next_sub_id
+        self._next_sub_id += 1
+        self._subscribers[sub_id] = cb
+
+        def _unsub() -> None:
+            self._subscribers.pop(sub_id, None)
+
+        return _unsub
+
+    def _emit(self, event: LifecycleEvent) -> None:
+        """Fan out *event* to all registered subscribers with per-subscriber isolation.
+
+        Iterates over a snapshot copy of the subscriber dict so that a subscriber
+        which unregisters itself (or another subscriber) during delivery does not
+        cause skipped or double deliveries.
+
+        A raising subscriber is logged using the same message text as the W1-P1
+        single-slot implementation so that existing test assertions on log messages
+        continue to pass.
+
+        Parameters
+        ----------
+        event:
+            Immutable :class:`LifecycleEvent` emitted by :meth:`_transition`.
+        """
+        for cb in list(self._subscribers.values()):
+            try:
+                cb(event)
+            except Exception:
+                logger.exception(
+                    "on_event callback raised for %s (%s -> %s); ignoring",
+                    self.name,
+                    event.from_state.value,
+                    event.to_state.value,
+                )
+
+    # ------------------------------------------------------------------
+    # W1-P1 — single state-mutation point
+    # ------------------------------------------------------------------
+
+    def _transition(
+        self,
+        to_state: ConnectionState,
+        reason: str,
+        *,
+        failure_class: str | None = None,
+        attempt: int | None = None,
+    ) -> LifecycleEvent:
+        """Transition to *to_state* and emit a :class:`LifecycleEvent`.
+
+        This is the **only** place that mutates ``self._state``.  All
+        production lifecycle paths (connect, disconnect, drain) call this
+        method rather than writing to ``self._state`` directly.
+
+        Unexpected transitions (edges not in :data:`LIFECYCLE_TRANSITIONS`)
+        are **logged as warnings but allowed** — fail-open ensures that
+        existing flows and test setup patterns are never broken.
+
+        Parameters
+        ----------
+        to_state:
+            The target :class:`ConnectionState`.
+        reason:
+            Short human-readable description of why the transition occurred.
+        failure_class:
+            Optional failure classifier string (e.g. ``"TRANSIENT"``).
+            Populated by W1-P3 classifier; ``None`` in legacy paths.
+        attempt:
+            Optional retry-attempt counter. Populated by W1-P2 supervisor;
+            ``None`` in legacy paths.
+
+        Returns
+        -------
+        LifecycleEvent
+            The immutable event record that was emitted.
+        """
+        from_state = self._state
+
+        # Self-loops (same → same) occur in concurrent drain scenarios and
+        # degenerate disconnect-on-disconnected calls.  They are not design
+        # violations — just no-ops at the state-machine level.  Skip the
+        # warning so we don't flood logs with noise from expected races.
+        if from_state != to_state and not is_valid_transition(from_state, to_state):
+            logger.warning(
+                "Unexpected transition on %s: %s -> %s (%s)",
+                self.name,
+                from_state.value,
+                to_state.value,
+                reason,
+            )
+
+        self._state = to_state
+
+        event = LifecycleEvent(
+            server=self.name,
+            from_state=from_state,
+            to_state=to_state,
+            reason=reason,
+            ts=time.time(),
+            failure_class=failure_class,
+            attempt=attempt,
+        )
+
+        # W1-P4: fan out to all subscribers via _emit (replaces single-slot
+        # on_event call; back-compat maintained by the on_event property setter
+        # which registers via the same subscriber dict).
+        # Observers must NEVER break the lifecycle path — _emit's per-subscriber
+        # try/except ensures a raising callback cannot corrupt the state we just set.
+        self._emit(event)
+
+        return event
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
     async def connect(self) -> None:
-        """Connect to the MCP server."""
+        """Connect to the MCP server via SDK OutboundClient.
+
+        Uses the official ``mcp`` SDK ``Client(mode="auto")`` for both stdio
+        and Streamable HTTP transports.
+
+        Raises:
+            ConnectionError: If the server cannot be reached or the MCP
+                initialization handshake fails.
+        """
         if self._state == ConnectionState.CONNECTED:
             return
 
-        self._state = ConnectionState.CONNECTING
+        self._transition(ConnectionState.CONNECTING, reason="connect() called")
 
-        if self._config.transport == "stdio":
-            await self._connect_stdio()
-        else:
-            await self._connect_http()
+        outbound = OutboundClient(self._config)
+        try:
+            await outbound.connect()
+        except OAuthAuthRequiredError:
+            # auth_required is a clean, expected state — NOT a crash.
+            # The connection remains unusable until the user runs auth login.
+            self._transition(
+                ConnectionState.AUTH_REQUIRED,
+                reason="OAuthAuthRequiredError — awaiting user login",
+                failure_class="AUTH",
+            )
+            return
+        except ConnectionError:
+            self._transition(
+                ConnectionState.ERROR,
+                reason="ConnectionError during connect",
+                failure_class="TRANSIENT",
+            )
+            raise
+        except Exception as exc:
+            self._transition(
+                ConnectionState.ERROR,
+                reason=f"Unexpected error during connect: {type(exc).__name__}",
+                failure_class="TERMINAL",
+            )
+            raise ConnectionError(
+                f"MCP {self.name} initialization failed ({type(exc).__name__})"
+            ) from exc
+
+        self._outbound = outbound
+        self._capabilities = outbound.capabilities
+        self._transition(
+            ConnectionState.CONNECTED,
+            reason="MCP init handshake complete",
+        )
+        self._connected_at = time.time()
+        logger.info(
+            "Connected to MCP: %s (%d tools, %d resources, %d prompts)",
+            self.name,
+            len(self._capabilities["tools"]),
+            len(self._capabilities["resources"]),
+            len(self._capabilities["prompts"]),
+        )
+
+    # ------------------------------------------------------------------
+    # W1-P2 supervisor hooks (thin public API over _transition)
+    # Each method delegates entirely to _transition — no logic here.
+    # The supervisor calls these instead of touching _transition directly.
+    # ------------------------------------------------------------------
+
+    def enter_reconnecting(self, attempt: int) -> "LifecycleEvent":
+        """Supervisor hook: enter RECONNECTING state for a retry backoff.
+
+        Called by :class:`~slm_mcp_hub.resilience.supervisor.ConnectionSupervisor`
+        before sleeping between connection attempts.  Exposes the attempt
+        counter so lifecycle events carry it for observability (W1-P4).
+
+        Parameters
+        ----------
+        attempt:
+            0-indexed retry attempt number (passed through to the event).
+
+        Returns
+        -------
+        LifecycleEvent
+            The immutable event emitted by :meth:`_transition`.
+        """
+        return self._transition(
+            ConnectionState.RECONNECTING,
+            reason=f"Supervisor: entering reconnect backoff (attempt={attempt})",
+            attempt=attempt,
+        )
+
+    def enter_circuit_open(self) -> "LifecycleEvent":
+        """Supervisor hook: enter CIRCUIT_OPEN state (breaker tripped).
+
+        Called by the supervisor after ``failure_threshold`` consecutive
+        connect failures.  The connection is still live at the state-machine
+        level; the supervisor will probe at ``backoff_max`` intervals.
+
+        Returns
+        -------
+        LifecycleEvent
+            The immutable event emitted by :meth:`_transition`.
+        """
+        return self._transition(
+            ConnectionState.CIRCUIT_OPEN,
+            reason="Supervisor: circuit breaker opened",
+            failure_class="CIRCUIT_OPEN",
+        )
+
+    def mark_failed(self, reason: str) -> "LifecycleEvent":
+        """Supervisor hook: enter FAILED state (terminal — no retry).
+
+        Called by the supervisor when the failure classifier determines that
+        the error is non-retryable (bad config, unknown transport, etc.).
+        The supervisor stops after this call.
+
+        Parameters
+        ----------
+        reason:
+            Human-readable description of the terminal failure.
+
+        Returns
+        -------
+        LifecycleEvent
+            The immutable event emitted by :meth:`_transition`.
+        """
+        return self._transition(
+            ConnectionState.FAILED,
+            reason=reason,
+            failure_class="TERMINAL",
+        )
 
     async def disconnect(self) -> None:
-        """Disconnect from the MCP server."""
-        if self._reader_task and not self._reader_task.done():
-            self._reader_task.cancel()
+        """Disconnect from the MCP server.
+
+        Closes the SDK OutboundClient and resets connection state.
+        """
+        if self._outbound is not None:
             try:
-                await self._reader_task
-            except asyncio.CancelledError:
-                pass
-            self._reader_task = None
+                await self._outbound.disconnect()
+            except Exception as exc:
+                logger.debug(
+                    "Error closing outbound client for %s: %s", self.name, exc
+                )
+            self._outbound = None
 
-        if self._stderr_task and not self._stderr_task.done():
-            self._stderr_task.cancel()
-            try:
-                await self._stderr_task
-            except asyncio.CancelledError:
-                pass
-            self._stderr_task = None
-
-        if self._process:
-            try:
-                self._process.terminate()
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except ProcessLookupError:
-                # Process already exited — nothing to do
-                pass
-            except asyncio.TimeoutError:
-                # Force-kill, but tolerate the race where the kid just died
-                try:
-                    self._process.kill()
-                except ProcessLookupError:
-                    pass
-            self._process = None
-
-        # Close HTTP client if present
-        if self._http_client is not None:
-            try:
-                await self._http_client.aclose()
-            except Exception:
-                pass
-            self._http_client = None
-
-        # Fail all pending requests
-        for future in self._pending.values():
-            if not future.done():
-                future.set_exception(ConnectionError("MCP server disconnected"))
-        self._pending = {}
-
-        self._state = ConnectionState.DISCONNECTED
+        self._transition(ConnectionState.DISCONNECTED, reason="disconnect() called")
         self._connected_at = 0.0
         logger.info("Disconnected from MCP: %s", self.name)
 
@@ -185,11 +483,8 @@ class MCPConnection:
         """Stop accepting new requests, wait for in-flight calls, then disconnect.
 
         Serialized per connection via _drain_lock so concurrent callers don't
-        overwrite each other's drain event. The second caller simply waits
+        overwrite each other's drain event.  The second caller simply waits
         for the first to complete, then sees state=DISCONNECTED and returns.
-
-        Keeps kite SSE sessions alive — drain only affects this one server's
-        connection, not the hub's other connections.
         """
         if self._drain_lock is None:
             self._drain_lock = asyncio.Lock()
@@ -201,7 +496,7 @@ class MCPConnection:
                 await self.disconnect()
                 return
 
-            self._state = ConnectionState.DRAINING
+            self._transition(ConnectionState.DRAINING, reason="drain_and_disconnect() called")
             if self._in_flight > 0:
                 self._drain_event = asyncio.Event()
                 logger.info(
@@ -212,486 +507,97 @@ class MCPConnection:
                     await asyncio.wait_for(self._drain_event.wait(), timeout=timeout_s)
                 except asyncio.TimeoutError:
                     logger.warning(
-                        "Drain timeout for %s after %.0fs — forcing disconnect with %d in-flight",
+                        "Drain timeout for %s after %.0fs — forcing disconnect "
+                        "with %d in-flight",
                         self.name, timeout_s, self._in_flight,
                     )
 
             await self.disconnect()
 
-    async def call_tool(self, tool_name: str, arguments: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
-        """Call a tool on this MCP server and return the result.
+    # ------------------------------------------------------------------
+    # RPC delegation
+    # ------------------------------------------------------------------
 
-        Args:
-            tool_name: Name of the tool to call.
-            arguments: Arguments to pass to the tool.
-            timeout_s: Per-call timeout in seconds. Uses server default if None.
+    async def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        timeout_s: float | None = None,  # noqa: ARG002 — kept for API compatibility
+    ) -> dict[str, Any]:
+        """Call a tool on this MCP server and return the result."""
+        self._check_callable()
+        return await self._dispatch(self._outbound.call_tool(tool_name, arguments))  # type: ignore[union-attr]
+
+    async def call_tool_streaming(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        *,
+        read_timeout_seconds: float | None = None,
+        progress_callback: Any | None = None,
+        resumption_token: str | None = None,
+        on_resumption_token: Callable[[str], Awaitable[None]] | None = None,
+    ) -> dict[str, Any]:
+        """Call a tool with progress, timeout, and resumption support.
+
+        Delegates to OutboundClient.call_tool_streaming and wraps in _dispatch
+        for in-flight tracking (drain semantics remain correct: the finally block
+        in _dispatch decrements _in_flight even on anyio structural cancellation).
+
+        Raises:
+            ConnectionError: If draining or outbound is None.
+            anyio.get_cancelled_exc_class(): Propagates through — NOT swallowed.
         """
-        return await self._send_request("tools/call", {
-            "name": tool_name,
-            "arguments": arguments,
-        }, timeout_s=timeout_s)
-
-    async def read_resource(self, uri: str, timeout_s: float | None = None) -> dict[str, Any]:
-        """Read a resource from this MCP server."""
-        return await self._send_request("resources/read", {"uri": uri}, timeout_s=timeout_s)
-
-    async def get_prompt(self, name: str, arguments: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
-        """Get a prompt from this MCP server."""
-        return await self._send_request("prompts/get", {
-            "name": name,
-            "arguments": arguments,
-        }, timeout_s=timeout_s)
-
-    async def _connect_stdio(self) -> None:
-        """Start a child process and perform MCP initialization handshake."""
-        runtime_config = materialize_server_config(self._config)
-        cmd = runtime_config.command
-        args = list(runtime_config.args)
-
-        # Child MCPs receive only process-launch essentials plus their explicit
-        # per-server configuration. In particular, they must not inherit hub
-        # credentials or unrelated values loaded from shared secret files.
-        env = {key: os.environ[key] for key in _INHERITED_ENV_KEYS if key in os.environ}
-        env.update(runtime_config.env)
-
-        try:
-            self._process = await asyncio.create_subprocess_exec(
-                cmd, *args,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-                limit=10 * 1024 * 1024,  # 10MB readline buffer for large MCP responses
+        self._check_callable()
+        return await self._dispatch(
+            self._outbound.call_tool_streaming(  # type: ignore[union-attr]
+                tool_name,
+                arguments,
+                read_timeout_seconds=read_timeout_seconds,
+                progress_callback=progress_callback,
+                resumption_token=resumption_token,
+                on_resumption_token=on_resumption_token,
             )
-        except FileNotFoundError as exc:
-            self._state = ConnectionState.ERROR
-            raise ConnectionError(f"Command not found for MCP {self.name}") from exc
-        except OSError as exc:
-            self._state = ConnectionState.ERROR
-            raise ConnectionError(
-                f"Failed to start MCP {self.name} ({type(exc).__name__})"
-            ) from None
-
-        # Start reading stdout (JSON-RPC responses)
-        self._reader_task = asyncio.create_task(self._read_stdout())
-        # Drain stderr to prevent child process blocking on full pipe buffer
-        self._stderr_task = asyncio.create_task(self._drain_stderr())
-
-        # MCP initialization handshake
-        try:
-            init_result = await self._send_request("initialize", {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "slm-mcp-hub", "version": VERSION},
-            })
-
-            # Send initialized notification (no response expected)
-            await self._send_notification("notifications/initialized", {})
-
-            # Record advertised capabilities so discovery only probes what the
-            # server supports (see _discover_capabilities).
-            caps = init_result.get("capabilities") if isinstance(init_result, dict) else None
-            self._server_capabilities = caps if isinstance(caps, dict) else None
-
-            # Discover capabilities
-            await self._discover_capabilities()
-
-            self._state = ConnectionState.CONNECTED
-            self._connected_at = time.time()
-            logger.info(
-                "Connected to MCP: %s (%d tools, %d resources, %d prompts)",
-                self.name,
-                len(self._capabilities["tools"]),
-                len(self._capabilities["resources"]),
-                len(self._capabilities["prompts"]),
-            )
-        except Exception:
-            self._state = ConnectionState.ERROR
-            await self.disconnect()
-            raise ConnectionError(f"MCP {self.name} initialization failed") from None
-
-    async def _connect_http(self) -> None:
-        """Connect to a remote HTTP MCP server via Streamable HTTP."""
-        try:
-            import httpx
-        except ImportError as exc:
-            self._state = ConnectionState.ERROR
-            raise ConnectionError(
-                "httpx required for HTTP transport. Install with: pip install httpx"
-            ) from exc
-
-        runtime_config = materialize_server_config(self._config)
-        self._http_url = runtime_config.url
-        self._http_client = httpx.AsyncClient(
-            headers={
-                "Accept": "application/json, text/event-stream",
-                **runtime_config.headers,
-            },
-            timeout=httpx.Timeout(MCP_REQUEST_TIMEOUT_MS / 1000),
         )
-        self._http_session_id = None
 
-        try:
-            init_result = await self._send_request("initialize", {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "slm-mcp-hub", "version": VERSION},
-            })
+    async def read_resource(
+        self,
+        uri: str,
+        timeout_s: float | None = None,  # noqa: ARG002 — kept for API compatibility
+    ) -> dict[str, Any]:
+        """Read a resource from this MCP server."""
+        self._check_callable()
+        return await self._dispatch(self._outbound.read_resource(uri))  # type: ignore[union-attr]
 
-            await self._send_notification("notifications/initialized", {})
+    async def get_prompt(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        timeout_s: float | None = None,  # noqa: ARG002 — kept for API compatibility
+    ) -> dict[str, Any]:
+        """Get a prompt from this MCP server."""
+        self._check_callable()
+        return await self._dispatch(self._outbound.get_prompt(name, arguments))  # type: ignore[union-attr]
 
-            # Record advertised capabilities so discovery only probes what the
-            # server supports (see _discover_capabilities).
-            caps = init_result.get("capabilities") if isinstance(init_result, dict) else None
-            self._server_capabilities = caps if isinstance(caps, dict) else None
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
-            await self._discover_capabilities()
-
-            self._state = ConnectionState.CONNECTED
-            self._connected_at = time.time()
-            logger.info(
-                "Connected to HTTP MCP: %s (%d tools, %d resources, %d prompts)",
-                self.name,
-                len(self._capabilities["tools"]),
-                len(self._capabilities["resources"]),
-                len(self._capabilities["prompts"]),
-            )
-        except Exception as exc:
-            self._state = ConnectionState.ERROR
-            if self._http_client is not None:
-                await self._http_client.aclose()
-            raise ConnectionError(
-                f"HTTP MCP {self.name} initialization failed "
-                f"({type(exc).__name__})"
-            ) from None
-
-    async def _discover_capabilities(self) -> None:
-        """Discover tools, resources, and prompts from the MCP server.
-
-        Optional resources/prompts probes are gated on the capabilities the
-        server advertised in its initialize response. Some servers (e.g. the
-        GitLab MCP server) return HTTP 404 for methods they don't support, and
-        some proxies (e.g. mcp-remote) fail to relay that as a JSON-RPC error —
-        leaving the request future unresolved and hanging the connect until the
-        federation timeout. Respecting advertised capabilities avoids probing
-        unsupported methods entirely. When capabilities weren't captured
-        (``_server_capabilities is None``), fall back to probing everything.
-        """
-        try:
-            tools_result = await self._send_request("tools/list", {})
-            # Guard: some HTTP MCPs return a non-dict result (e.g. a bare string).
-            # Calling .get() on a str raises AttributeError and marks the server ERROR.
-            if isinstance(tools_result, dict):
-                self._capabilities["tools"] = tools_result.get("tools", [])
-            else:
-                logger.warning(
-                    "tools/list for %s returned unexpected type %s — treating as no tools",
-                    self.name, type(tools_result).__name__,
-                )
-        except Exception as exc:
-            logger.warning("Failed to list tools for %s: %s", self.name, exc)
-
-        server_caps = self._server_capabilities
-        probe_resources = server_caps is None or "resources" in server_caps
-        probe_prompts = server_caps is None or "prompts" in server_caps
-
-        if probe_resources:
-            try:
-                res_result = await self._send_request("resources/list", {})
-                if isinstance(res_result, dict):
-                    self._capabilities["resources"] = res_result.get("resources", [])
-            except Exception as exc:
-                logger.debug("No resources for %s: %s", self.name, exc)
-
-            try:
-                tmpl_result = await self._send_request("resources/templates/list", {})
-                if isinstance(tmpl_result, dict):
-                    self._capabilities["resource_templates"] = tmpl_result.get("resourceTemplates", [])
-            except Exception as exc:
-                logger.debug("No resource templates for %s: %s", self.name, exc)
-        else:
-            logger.debug("%s did not advertise resources — skipping resources discovery", self.name)
-
-        if probe_prompts:
-            try:
-                prompts_result = await self._send_request("prompts/list", {})
-                if isinstance(prompts_result, dict):
-                    self._capabilities["prompts"] = prompts_result.get("prompts", [])
-            except Exception as exc:
-                logger.debug("No prompts for %s: %s", self.name, exc)
-        else:
-            logger.debug("%s did not advertise prompts — skipping prompts discovery", self.name)
-
-    async def _send_request(self, method: str, params: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
-        """Send a JSON-RPC request and wait for the response.
-
-        Args:
-            method: JSON-RPC method name.
-            params: Method parameters.
-            timeout_s: Per-call timeout override. Uses server default if None.
-        """
-        if self._config.transport in ("http", "sse"):
-            return await self._send_request_http(method, params, timeout_s=timeout_s)
-        return await self._send_request_stdio(method, params, timeout_s=timeout_s)
-
-    async def _send_request_stdio(self, method: str, params: dict[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
-        """Send via stdio subprocess.
-
-        Args:
-            method: JSON-RPC method name.
-            params: Method parameters.
-            timeout_s: Per-call timeout in seconds. Falls back to MCP_REQUEST_TIMEOUT_MS
-                       if None (long timeout for video gen / deep research).
-        """
+    def _check_callable(self) -> None:
+        """Raise ConnectionError if this connection cannot accept new requests."""
         if self._state == ConnectionState.DRAINING:
-            raise ConnectionError(f"MCP {self.name} is draining — no new requests accepted")
-        if not self._process or not self._process.stdin:
+            raise ConnectionError(
+                f"MCP {self.name} is draining — no new requests accepted"
+            )
+        if self._outbound is None:
             raise ConnectionError(f"MCP {self.name} not connected")
 
-        self._request_id += 1
-        req_id = self._request_id
-
-        message = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": method,
-            "params": params,
-        }
-
-        future: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
-        self._pending[req_id] = future
+    async def _dispatch(self, coro: Any) -> Any:
+        """Run *coro* while tracking the in-flight count for drain semantics."""
         self._in_flight += 1
-
-        data = json.dumps(message) + "\n"
-        self._process.stdin.write(data.encode())
-        await self._process.stdin.drain()
-
         try:
-            effective_timeout = timeout_s if timeout_s is not None else (MCP_REQUEST_TIMEOUT_MS / 1000)
-            result = await asyncio.wait_for(future, timeout=effective_timeout)
-        except asyncio.TimeoutError as exc:
-            self._pending.pop(req_id, None)
-            raise TimeoutError(f"MCP {self.name} request {method} timed out") from exc
+            return await coro
         finally:
             self._in_flight -= 1
             if self._in_flight == 0 and self._drain_event is not None:
                 self._drain_event.set()
-
-        if "error" in result:
-            err = result["error"]
-            raise RuntimeError(
-                f"MCP {self.name} error: [{err.get('code', -1)}] {err.get('message', 'unknown')}"
-            )
-
-        return result.get("result", {})
-
-    async def _send_request_http(
-        self,
-        method: str,
-        params: dict[str, Any],
-        timeout_s: float | None = None,
-    ) -> dict[str, Any]:
-        """Send via HTTP POST to remote MCP server."""
-        if self._http_client is None:
-            raise ConnectionError(f"MCP {self.name} HTTP client not initialized")
-
-        self._request_id += 1
-        req_id = self._request_id
-
-        message = {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "method": method,
-            "params": params,
-        }
-
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-        }
-        if hasattr(self, "_http_session_id") and self._http_session_id:
-            headers["Mcp-Session-Id"] = self._http_session_id
-
-        effective_timeout = timeout_s if timeout_s is not None else (MCP_REQUEST_TIMEOUT_MS / 1000)
-        try:
-            response = await asyncio.wait_for(
-                self._http_client.post(self._http_url, json=message, headers=headers),
-                timeout=effective_timeout,
-            )
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"MCP {self.name} request {method} timed out") from None
-        except Exception as exc:
-            raise ConnectionError(
-                f"MCP {self.name} HTTP request failed ({type(exc).__name__})"
-            ) from None
-
-        if not 200 <= response.status_code < 300:
-            raise ConnectionError(
-                f"MCP {self.name} HTTP {response.status_code} response"
-            )
-
-        # Capture session ID from response
-        session_id = response.headers.get("mcp-session-id")
-        if session_id:
-            self._http_session_id = session_id
-
-        if response.status_code == 204:
-            return {}
-
-        # Handle SSE responses — extract the JSON-RPC message from event stream
-        content_type = response.headers.get("content-type", "")
-        try:
-            if "text/event-stream" in content_type:
-                result = self._parse_sse_response(response.text)
-            else:
-                result = response.json()
-        except (TypeError, ValueError):
-            raise ConnectionError(f"MCP {self.name} returned invalid JSON") from None
-
-        if not isinstance(result, dict):
-            raise ConnectionError(f"MCP {self.name} returned invalid JSON")
-
-        if "error" in result:
-            err = result["error"]
-            code = err.get("code", -1) if isinstance(err, dict) else -1
-            raise RuntimeError(f"MCP {self.name} JSON-RPC error [{code}]")
-
-        return result.get("result", {})
-
-    async def _send_notification(self, method: str, params: dict[str, Any]) -> None:
-        """Send a JSON-RPC notification (no response expected)."""
-        if self._config.transport in ("http", "sse"):
-            await self._send_notification_http(method, params)
-            return
-
-        if not self._process or not self._process.stdin:
-            raise ConnectionError(f"MCP {self.name} not connected")
-
-        message = {
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        }
-
-        data = json.dumps(message) + "\n"
-        self._process.stdin.write(data.encode())
-        await self._process.stdin.drain()
-
-    async def _send_notification_http(self, method: str, params: dict[str, Any]) -> None:
-        """Send notification via HTTP POST."""
-        if self._http_client is None:
-            return
-
-        message = {
-            "jsonrpc": "2.0",
-            "method": method,
-            "params": params,
-        }
-
-        headers = {"Content-Type": "application/json"}
-        if hasattr(self, "_http_session_id") and self._http_session_id:
-            headers["Mcp-Session-Id"] = self._http_session_id
-
-        try:
-            await self._http_client.post(self._http_url, json=message, headers=headers)
-        except Exception:
-            pass  # Notifications don't require response
-
-    @staticmethod
-    def _parse_sse_response(text: str) -> dict[str, Any]:
-        """Parse a Server-Sent Events response to extract JSON-RPC message."""
-        for line in text.split("\n"):
-            line = line.strip()
-            if line.startswith("data:"):
-                data_str = line[5:].strip()
-                if data_str:
-                    try:
-                        return json.loads(data_str)
-                    except json.JSONDecodeError:
-                        continue
-        # Fallback: try parsing the whole response as JSON
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return {"error": {"code": -32700, "message": "Could not parse SSE response"}}
-
-    async def _drain_stderr(self) -> None:
-        """Drain child process stderr; keep a rolling tail for diagnostics."""
-        if not self._process or not self._process.stderr:
-            return
-        try:
-            while True:
-                line = await self._process.stderr.readline()
-                if not line:
-                    break
-                if line.strip():
-                    self._stderr_output_seen = True
-                    logger.debug("MCP %s emitted stderr output (content omitted)", self.name)
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            pass
-
-    def _exit_diagnostic(self) -> str:
-        """Build an actionable child-exit error without exposing configuration."""
-        parts: list[str] = [f"MCP '{self.name}' child process exited"]
-
-        exit_code = None
-        if self._process is not None:
-            exit_code = self._process.returncode
-        if exit_code is not None:
-            parts.append(f"with exit code {exit_code}")
-
-        if self._stderr_output_seen or self._stderr_tail:
-            parts.append("stderr output was captured and omitted")
-        else:
-            parts.append("no stderr output captured — verify the command is an MCP server, not a one-shot command")
-
-        return "; ".join(parts)
-
-    async def _read_stdout(self) -> None:
-        """Read JSON-RPC messages from the child process stdout."""
-        assert self._process and self._process.stdout
-
-        try:
-            while True:
-                line = await self._process.stdout.readline()
-                if not line:
-                    # EOF — child process exited; fail all pending futures
-                    break
-
-                text = line.decode("utf-8").strip()
-                if not text:
-                    continue
-
-                try:
-                    msg = json.loads(text)
-                except json.JSONDecodeError:
-                    logger.debug("Non-JSON output from %s (content omitted)", self.name)
-                    continue
-
-                req_id = msg.get("id")
-                if req_id is not None and req_id in self._pending:
-                    future = self._pending.pop(req_id)
-                    if not future.done():
-                        future.set_result(msg)
-                elif "method" in msg:
-                    logger.debug("Notification from %s: %s", self.name, msg.get("method"))
-
-        except asyncio.CancelledError:
-            pass
-        except Exception as exc:
-            logger.error("Reader error for %s (%s)", self.name, type(exc).__name__)
-            self._state = ConnectionState.ERROR
-        finally:
-            # Fail all pending futures with a diagnostic that includes the
-            # exit code, command, and last few stderr lines — saves a lot of
-            # debugging when a misconfigured command silently fails.
-            if self._pending:
-                # Give stderr drain a tick to flush before we read the tail
-                await asyncio.sleep(0)
-                err = ConnectionError(self._exit_diagnostic())
-                for future in self._pending.values():
-                    if not future.done():
-                        future.set_exception(err)
-                self._pending = {}
