@@ -4,11 +4,14 @@ Coverage:
 - add_server / remove_server / replace_server happy + sad paths
 - disconnect_one removes entry from _connections (bug fix)
 - MCPConnection drain_and_disconnect (no in-flight, with in-flight, timeout)
-- MCPConnection rejects requests when DRAINING
-- MCPConnection _read_stdout EOF fails pending futures (bug fix)
-- MCPConnection stderr drain task lifecycle
 - ConnectionManager _lock serializes concurrent mutations
 - FederationRouter routes correctly when conn.is_draining is True
+
+Deleted (P04 dead-code removal):
+- TestExitDiagnostic — tested _exit_diagnostic(), _stderr_tail, _process
+- TestDrainingRejectsRequests — tested _send_request_stdio() (deleted)
+- TestEOFFailsPending — tested _read_stdout() and _pending dict (deleted)
+- test_disconnect_tolerates_already_dead_process — tested _process teardown (deleted)
 """
 
 from __future__ import annotations
@@ -299,31 +302,6 @@ class TestDrainSemantics:
         # Even on timeout we still disconnect — drain is best-effort
 
     @pytest.mark.asyncio
-    async def test_disconnect_tolerates_already_dead_process(self):
-        """Regression: v0.2.0-rc1 had a path where disconnect() raised
-        ProcessLookupError when the child process exited before terminate().
-        Caught via real-environment smoke test in Stage 11 pre-release gate.
-        Fix: wrap kill() in its own try/except too."""
-        from slm_mcp_hub.federation.connection import MCPConnection
-        cfg = MCPServerConfig(name="z", transport="stdio", command="echo")
-        conn = MCPConnection(cfg)
-        conn._state = ConnectionState.ERROR
-
-        # Fake process that raises ProcessLookupError on both terminate() and kill()
-        proc = MagicMock()
-        proc.terminate = MagicMock(side_effect=ProcessLookupError())
-        proc.kill = MagicMock(side_effect=ProcessLookupError())
-        async def fake_wait():
-            raise ProcessLookupError()
-        proc.wait = fake_wait
-        conn._process = proc
-
-        # Must not raise
-        await conn.disconnect()
-        assert conn._process is None
-        assert conn._state == ConnectionState.DISCONNECTED
-
-    @pytest.mark.asyncio
     async def test_drain_when_already_disconnected_is_safe(self):
         cfg = MCPServerConfig(name="z", transport="stdio", command="echo")
         conn = MCPConnection(cfg)
@@ -368,89 +346,6 @@ class TestDrainSemantics:
             )
         # Both calls succeed; disconnect called at least once
         assert disconnect_calls >= 1
-
-
-class TestExitDiagnostic:
-    """Verify the rich error message produced when a child process dies."""
-
-    def test_diagnostic_includes_exit_code_but_omits_command(self):
-        from slm_mcp_hub.federation.connection import MCPConnection
-        cfg = MCPServerConfig(name="echo-srv", transport="stdio", command="echo", args=("hello",))
-        conn = MCPConnection(cfg)
-        proc = MagicMock()
-        proc.returncode = 0
-        conn._process = proc
-
-        msg = conn._exit_diagnostic()
-        assert "echo-srv" in msg
-        assert "exit code 0" in msg
-        assert "echo hello" not in msg
-        assert "verify the command is an MCP server" in msg
-
-    def test_diagnostic_omits_stderr_tail(self):
-        from slm_mcp_hub.federation.connection import MCPConnection
-        cfg = MCPServerConfig(name="bad", transport="stdio", command="false")
-        conn = MCPConnection(cfg)
-        conn._stderr_tail.extend(["error: bad config line 1", "error: bad config line 2"])
-        proc = MagicMock()
-        proc.returncode = 1
-        conn._process = proc
-
-        msg = conn._exit_diagnostic()
-        assert "stderr output was captured and omitted" in msg
-        assert "bad config line 2" not in msg
-
-    def test_diagnostic_no_process_handle(self):
-        """If process never spawned, diagnostic still works (no exit code)."""
-        from slm_mcp_hub.federation.connection import MCPConnection
-        cfg = MCPServerConfig(name="ghost", transport="stdio", command="nonexistent")
-        conn = MCPConnection(cfg)
-        # No _process set
-        msg = conn._exit_diagnostic()
-        assert "ghost" in msg
-        assert "nonexistent" not in msg
-
-
-# ---------- MCPConnection rejects requests while draining ----------
-
-class TestDrainingRejectsRequests:
-    @pytest.mark.asyncio
-    async def test_draining_state_rejects_new_request(self):
-        cfg = MCPServerConfig(name="z", transport="stdio", command="echo")
-        conn = MCPConnection(cfg)
-        conn._state = ConnectionState.DRAINING
-
-        with pytest.raises(ConnectionError, match="draining"):
-            await conn._send_request_stdio("tools/list", {})
-
-
-# ---------- MCPConnection EOF fails pending futures (regression) ----------
-
-class TestEOFFailsPending:
-    @pytest.mark.asyncio
-    async def test_read_stdout_eof_fails_all_pending(self):
-        cfg = MCPServerConfig(name="z", transport="stdio", command="echo")
-        conn = MCPConnection(cfg)
-
-        # Set up fake process with stdout that returns EOF immediately
-        fake_proc = MagicMock()
-        fake_proc.stdout = MagicMock()
-        fake_proc.stdout.readline = AsyncMock(return_value=b"")
-        conn._process = fake_proc
-
-        # Add a pending future that should be failed by EOF
-        loop = asyncio.get_running_loop()
-        pending_future: asyncio.Future = loop.create_future()
-        conn._pending[1] = pending_future
-
-        await conn._read_stdout()
-
-        # Bug fix: future is failed with ConnectionError, not left hanging
-        assert pending_future.done()
-        with pytest.raises(ConnectionError, match="child process exited"):
-            pending_future.result()
-        # _pending is cleared
-        assert conn._pending == {}
 
 
 # ---------- FederationRouter: draining state surfaced ----------

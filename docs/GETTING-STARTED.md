@@ -83,18 +83,31 @@ export SLM_API_KEY='your-daemon-api-key'
 slm-hub start
 ```
 
-Do not add the SLM daemon under `mcpServers` when the direct plugins are
-enabled.
+Do not add the SLM daemon under `mcpServers` when the direct plugins are enabled.
 
-## 6. Stateless clients
+## 6. Transport mode
 
-MCP `2026-07-28` requests are sessionless. Older clients that do not retain
-`Mcp-Session-Id` can use compatibility mode:
+The default is stateless MCP `2026-07-28`: no session tracking, no resumable
+replay. This is the right choice for most deployments.
+
+Enable stateful sessions if you need resumable streaming — for example, when
+running long-running backend tools and you want the client↔hub stream to survive
+a network blip:
 
 ```bash
-export SLM_HUB_STATELESS=1
+export SLM_HUB_STATEFUL=1
 slm-hub start
 ```
+
+Or set `transport_stateful: true` in `config.json`.
+
+**What stateful mode adds:** The SDK's `InMemoryEventStore` handles client↔hub
+`Last-Event-ID` reconnection automatically. On the hub→backend leg, a one-shot
+retry fires when a backend drops mid-stream and had issued a resumption token.
+Without a token, the call fails cleanly.
+
+**What stateful mode costs:** Per-client session state in memory; the hub must
+be running for clients to resume (unlike stateless, which has no state to recover).
 
 ## 7. Verify
 

@@ -1,16 +1,22 @@
 """Protocol and recovery regressions for the public federation boundary.
 
-These tests exercise behavior that normal happy-path federation tests do not:
-HTTP session handling, malformed upstream responses, lifecycle shutdown, and
-partial reload failures.  They deliberately use realistic MCP JSON-RPC frames
-rather than inspecting implementation-only state.
+Covers lifecycle shutdown, partial reload failures, and manager recovery.
+
+Deleted in P04 (dead-code removal):
+- TestHttpMcpProtocol — tested _send_request_http, _send_notification, _http_client,
+  _http_url, _http_session_id, _connect_http, _parse_sse_response (all deleted)
+- TestConnectionRecovery::test_disconnect_cleans_stderr_and_http_client_even_when_close_fails
+  — tested _stderr_task, _http_client cleanup (deleted)
+- TestConnectionRecovery::test_stderr_drain_omits_sensitive_content_from_logs_and_diagnostics
+  — tested _drain_stderr(), _exit_diagnostic(), _process (all deleted)
+- TestConnectionRecovery::test_stderr_drain_handles_closed_or_broken_pipe
+  — tested _drain_stderr() directly (deleted)
 """
 
 from __future__ import annotations
 
 import asyncio
 import io
-import logging
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -19,7 +25,6 @@ import pytest
 
 from slm_mcp_hub.core.config import HubConfig, MCPServerConfig
 from slm_mcp_hub.core.registry import CapabilityRegistry
-from slm_mcp_hub.federation.connection import ConnectionState, MCPConnection
 from slm_mcp_hub.federation.manager import ConnectionManager
 from slm_mcp_hub.lifecycle.notifier import ChangeNotifier
 from slm_mcp_hub.lifecycle.reloader import ConfigReloader
@@ -37,10 +42,6 @@ def _server(name: str = "srv", **kwargs: object) -> MCPServerConfig:
     return MCPServerConfig(**values)  # type: ignore[arg-type]
 
 
-def _connection(**kwargs: object) -> MCPConnection:
-    return MCPConnection(_server(**kwargs))
-
-
 def _connected_mock(tools: list[dict] | None = None) -> MagicMock:
     connection = MagicMock()
     connection.is_connected = True
@@ -51,182 +52,6 @@ def _connected_mock(tools: list[dict] | None = None) -> MagicMock:
     connection.disconnect = AsyncMock()
     connection.drain_and_disconnect = AsyncMock()
     return connection
-
-
-class TestHttpMcpProtocol:
-    @pytest.mark.asyncio
-    async def test_http_response_carries_session_id_to_next_request(self) -> None:
-        connection = _connection(transport="http", url="https://mcp.example.test")
-        client = AsyncMock()
-        first = MagicMock(
-            status_code=200,
-            headers={"mcp-session-id": "session-42", "content-type": "application/json"},
-        )
-        first.json.return_value = {"jsonrpc": "2.0", "id": 1, "result": {"tools": []}}
-        second = MagicMock(
-            status_code=200,
-            headers={"content-type": "application/json"},
-        )
-        second.json.return_value = {"jsonrpc": "2.0", "id": 2, "result": {"ok": True}}
-        client.post = AsyncMock(side_effect=[first, second])
-        connection._http_client = client
-        connection._http_url = "https://mcp.example.test"
-
-        assert await connection._send_request_http("tools/list", {}) == {"tools": []}
-        assert await connection._send_request_http("tools/call", {"name": "ping"}) == {"ok": True}
-        assert client.post.await_args_list[1].kwargs["headers"]["Mcp-Session-Id"] == "session-42"
-
-    @pytest.mark.asyncio
-    async def test_http_notification_uses_existing_session_and_tolerates_network_failure(self) -> None:
-        connection = _connection(transport="http", url="https://mcp.example.test")
-        client = AsyncMock()
-        client.post = AsyncMock(side_effect=httpx.ConnectError("offline"))
-        connection._http_client = client
-        connection._http_url = "https://mcp.example.test"
-        connection._http_session_id = "existing-session"
-
-        await connection._send_notification("notifications/initialized", {})
-
-        assert client.post.await_args.kwargs["headers"]["Mcp-Session-Id"] == "existing-session"
-
-    @pytest.mark.asyncio
-    async def test_http_204_is_a_valid_empty_jsonrpc_response(self) -> None:
-        connection = _connection(transport="http", url="https://mcp.example.test")
-        client = AsyncMock()
-        client.post = AsyncMock(return_value=MagicMock(status_code=204, headers={}))
-        connection._http_client = client
-        connection._http_url = "https://mcp.example.test"
-
-        assert await connection._send_request_http("notifications/initialized", {}) == {}
-
-    @pytest.mark.asyncio
-    async def test_http_sse_and_error_responses_preserve_protocol_semantics(self) -> None:
-        connection = _connection(transport="http", url="https://mcp.example.test")
-        sse = MagicMock(status_code=200, headers={"content-type": "text/event-stream"})
-        sse.text = "event: message\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n"
-        rpc_error = MagicMock(status_code=200, headers={"content-type": "application/json"})
-        rpc_error.json.return_value = {"error": {"code": -32601, "message": "unknown method"}}
-        connection._http_client = AsyncMock(post=AsyncMock(side_effect=[sse, rpc_error]))
-        connection._http_url = "https://mcp.example.test"
-
-        assert await connection._send_request_http("tools/list", {}) == {"ok": True}
-        with pytest.raises(RuntimeError, match=r"JSON-RPC error \[-32601\]"):
-            await connection._send_request_http("bad/method", {})
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("status_code", [401, 403, 500])
-    async def test_http_non_success_status_fails_closed_without_response_body(
-        self, status_code: int
-    ) -> None:
-        connection = _connection(transport="http", url="https://secret.example.test/token")
-        response = MagicMock(status_code=status_code, headers={"content-type": "application/json"})
-        response.json.return_value = {"detail": "review-secret-sentinel"}
-        connection._http_client = AsyncMock(post=AsyncMock(return_value=response))
-        connection._http_url = "https://secret.example.test/token"
-
-        with pytest.raises(ConnectionError, match=f"HTTP {status_code}") as error:
-            await connection._send_request_http("tools/list", {})
-
-        assert "review-secret-sentinel" not in str(error.value)
-        assert "secret.example" not in str(error.value)
-
-    @pytest.mark.asyncio
-    async def test_http_malformed_json_fails_with_sanitized_error(self) -> None:
-        connection = _connection(transport="http", url="https://secret.example.test/token")
-        response = MagicMock(status_code=200, headers={"content-type": "application/json"})
-        response.json.side_effect = ValueError("review-secret-sentinel")
-        connection._http_client = AsyncMock(post=AsyncMock(return_value=response))
-        connection._http_url = "https://secret.example.test/token"
-
-        with pytest.raises(ConnectionError, match="invalid JSON") as error:
-            await connection._send_request_http("tools/list", {})
-
-        assert "review-secret-sentinel" not in str(error.value)
-
-    @pytest.mark.asyncio
-    async def test_http_request_honors_per_call_timeout(self) -> None:
-        connection = _connection(transport="http", url="https://mcp.example.test")
-
-        async def delayed_post(*args: object, **kwargs: object) -> MagicMock:
-            await asyncio.sleep(0.05)
-            return MagicMock(status_code=204, headers={})
-
-        connection._http_client = AsyncMock(post=delayed_post)
-        connection._http_url = "https://mcp.example.test"
-
-        with pytest.raises(TimeoutError, match="timed out"):
-            await connection._send_request_http("tools/list", {}, timeout_s=0.001)
-
-    @pytest.mark.asyncio
-    async def test_http_connect_discovers_only_advertised_tools(self) -> None:
-        connection = _connection(transport="http", url="https://mcp.example.test")
-        client = AsyncMock()
-        connection._send_request = AsyncMock(side_effect=[
-            {"capabilities": {"tools": {}}},
-            {"tools": [{"name": "search"}]},
-        ])
-        connection._send_notification = AsyncMock()
-
-        with patch("httpx.AsyncClient", return_value=client):
-            await connection._connect_http()
-
-        assert connection.state is ConnectionState.CONNECTED
-        assert connection.capabilities["tools"] == [{"name": "search"}]
-        assert connection._send_request.await_count == 2
-        await connection.disconnect()
-
-    def test_sse_parser_skips_bad_event_data_then_falls_back_to_json(self) -> None:
-        assert MCPConnection._parse_sse_response("data: not-json\ndata: {\"result\": {\"x\": 1}}") == {"result": {"x": 1}}
-        assert MCPConnection._parse_sse_response('{"result": {"fallback": true}}') == {"result": {"fallback": True}}
-        assert MCPConnection._parse_sse_response("data: still-not-json") == {
-            "error": {"code": -32700, "message": "Could not parse SSE response"},
-        }
-
-
-class TestConnectionRecovery:
-    @pytest.mark.asyncio
-    async def test_disconnect_cleans_stderr_and_http_client_even_when_close_fails(self) -> None:
-        connection = _connection()
-        connection._stderr_task = asyncio.create_task(asyncio.sleep(60))
-        http_client = AsyncMock()
-        http_client.aclose = AsyncMock(side_effect=RuntimeError("close failed"))
-        connection._http_client = http_client
-
-        await connection.disconnect()
-
-        assert connection._stderr_task is None
-        assert connection._http_client is None
-        http_client.aclose.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_stderr_drain_omits_sensitive_content_from_logs_and_diagnostics(
-        self, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        secret = "review-secret-sentinel"
-        connection = _connection(command=secret, args=(secret,))
-        stderr = AsyncMock()
-        stderr.readline = AsyncMock(side_effect=[f"{secret}\n".encode(), b""])
-        process = MagicMock(returncode=17)
-        process.stderr = stderr
-        connection._process = process
-
-        with caplog.at_level(logging.DEBUG):
-            await connection._drain_stderr()
-        diagnostic = connection._exit_diagnostic()
-
-        assert "exit code 17" in diagnostic
-        assert "stderr output was captured and omitted" in diagnostic
-        assert secret not in diagnostic
-        assert secret not in caplog.text
-
-    @pytest.mark.asyncio
-    async def test_stderr_drain_handles_closed_or_broken_pipe(self) -> None:
-        connection = _connection()
-        await connection._drain_stderr()  # no process/stdout pipe is an expected shutdown state
-        broken = AsyncMock()
-        broken.readline = AsyncMock(side_effect=RuntimeError("pipe closed"))
-        connection._process = MagicMock(stderr=broken)
-        await connection._drain_stderr()
 
 
 class TestManagerRecovery:

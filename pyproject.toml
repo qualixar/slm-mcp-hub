@@ -20,12 +20,17 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries",
 ]
 dependencies = [
     "click>=8.1.0",
     "fastapi>=0.110.0",
+    "filelock>=3.32,<4",
     "httpx>=0.27.0",
+    "httpx2>=2.9,<3",
+    "keyring>=25.7,<26",
+    "mcp==2.0.0",
     "uvicorn>=0.27.0",
 ]
 
@@ -34,9 +39,11 @@ network = ["zeroconf>=0.131.0"]
 slm = ["superlocalmemory>=3.4.0"]
 mesh = ["superlocalmemory>=3.4.0"]
 full = ["superlocalmemory>=3.4.0"]
+# W5-P1: psutil for optional RAM monitoring of stdio backends.
+# Install via: pip install slm-mcp-hub[observability]
+observability = ["psutil>=5.9.0"]
 dev = [
     "build>=1.2",
-    "httpx2>=2.9,<3",
     "mypy>=1.15",
     "pip-audit>=2.9",
     "pytest>=8.0",
@@ -67,6 +74,7 @@ version = {attr = "slm_mcp_hub.core.constants.VERSION"}
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+pythonpath = ["src"]
 
 [tool.coverage.run]
 source = ["slm_mcp_hub"]
@@ -74,7 +82,7 @@ omit = ["*/tests/*"]
 
 [tool.coverage.report]
 show_missing = true
-fail_under = 96
+fail_under = 97
 
 [tool.ruff]
 target-version = "py311"

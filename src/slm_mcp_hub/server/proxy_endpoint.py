@@ -68,6 +68,11 @@ class ProxyEndpoint:
             return _error_response(msg_id, -32001, f"Server not found: {server_name}")
 
         if not conn.is_connected:
+            if conn.is_auth_required:
+                return _error_response(
+                    msg_id, -32003,
+                    f"Server requires authentication: {server_name}",
+                )
             return _error_response(msg_id, -32002, f"Server not connected: {server_name}")
 
         # Handle MCP protocol methods
@@ -212,10 +217,18 @@ class ProxyEndpoint:
 
 
 def _build_init_result(conn: MCPConnection) -> dict[str, Any]:
-    """Build an MCP initialize response for a proxied server."""
+    """Build an MCP initialize response for a proxied server.
+
+    The ``protocolVersion`` is taken from the negotiated peer captured
+    during SDK connect().  For connections that used the legacy hand-rolled
+    path (e.g. unit tests that bypass connect()), it falls back to the
+    2024-11-05 baseline so tests remain green.
+    """
     caps = conn.capabilities
+    peer = conn.negotiated_peer
+    proto_version = peer.protocol_version if peer is not None else "2024-11-05"
     return {
-        "protocolVersion": "2024-11-05",
+        "protocolVersion": proto_version,
         "capabilities": {
             "tools": {"listChanged": True} if caps.get("tools") else {},
             "resources": {"listChanged": True} if caps.get("resources") else {},

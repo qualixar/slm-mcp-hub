@@ -378,6 +378,41 @@ class TestDetectProjectType:
             # Restore permissions for cleanup
             os.chmod(sub, 0o755)
 
+    def test_unrecognized_extension_top_level(self, tmp_path):
+        """File with unrecognized extension at top level is ignored (False branch of `if pt`)."""
+        (tmp_path / "data.xyz").write_text("something")
+        # No recognized extension → type_counts is empty → returns None
+        assert detect_project_type(str(tmp_path)) is None
+
+    def test_subdir_contains_subdir_not_recursed(self, tmp_path):
+        """Sub-subdirectory at depth 2 is not recursed into (False branch of grandchild.is_file())."""
+        sub = tmp_path / "src"
+        sub.mkdir()
+        deep = sub / "deep"
+        deep.mkdir()
+        (deep / "app.py").write_text("x=1")
+        # Only 1 level deep — deep/ is a dir grandchild, not a file, so is_file() is False
+        assert detect_project_type(str(tmp_path)) is None
+
+    def test_unrecognized_extension_in_subdir(self, tmp_path):
+        """File with unrecognized extension in subdirectory is ignored (False branch of grandchild `if pt`)."""
+        sub = tmp_path / "src"
+        sub.mkdir()
+        (sub / "data.xyz").write_text("something")
+        # Grandchild has unrecognized extension → pt is None → False branch of `if pt`
+        assert detect_project_type(str(tmp_path)) is None
+
+    def test_broken_symlink_top_level_ignored(self, tmp_path):
+        """Broken symlink (not file, not dir) at top level does not crash."""
+        import os
+        # Create a broken symlink — is_file() and is_dir() both return False
+        os.symlink(
+            str(tmp_path / "nonexistent_target"),
+            str(tmp_path / "broken.lnk"),
+        )
+        # No recognized files → returns None without crashing
+        assert detect_project_type(str(tmp_path)) is None
+
 
 class TestGetRelevantServers:
     def test_python(self):

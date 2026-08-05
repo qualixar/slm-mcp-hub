@@ -1,6 +1,6 @@
 {
   "name": "slm-mcp-hub",
-  "version": "0.2.6",
+  "version": "0.3.0",
   "description": "A local-first MCP gateway for federating stdio and HTTP servers through one endpoint.",
   "keywords": [
     "mcp",

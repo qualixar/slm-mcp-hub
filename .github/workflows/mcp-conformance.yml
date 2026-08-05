@@ -1,0 +1,123 @@
+name: MCP Conformance
+
+on:
+  push:
+    branches: [main, develop, "p03/**"]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+jobs:
+  conformance:
+    name: MCP 2026-07-28 Conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: python -m pip install -e ".[network]"
+
+      - name: Set up Node (for conformance harness)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Start Hub in SDK mode (background)
+        env:
+          HUB_CONFIG: "${{ runner.temp }}/hub-conformance-config.json"
+        run: |
+          # Write a minimal config with no backend servers so the hub starts fast.
+          # The hub must expose its meta-tools (search_tools, call_tool, list_servers)
+          # but no backend MCP servers are needed for protocol conformance testing.
+          cat > "$HUB_CONFIG" <<'EOF'
+          {"mcpServers": {}}
+          EOF
+
+          # NOTE: the command is `start` (not `serve`). `--sdk-mode` activates the
+          # official mcp.server.lowlevel.Server transport (MCP 2026-07-28).
+          python -m slm_mcp_hub.cli.main start \
+            --host 127.0.0.1 \
+            --port 18765 \
+            --sdk-mode \
+            --config "$HUB_CONFIG" \
+            &
+          echo "HUB_PID=$!" >> "$GITHUB_ENV"
+
+          # Wait for the hub to be ready (max 15 s)
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:18765/api/health >/dev/null 2>&1; then
+              echo "Hub ready after ${i}x0.5s"
+              break
+            fi
+            sleep 0.5
+          done
+
+      - name: Run MCP conformance harness
+        id: conformance
+        env:
+          MCP_ENDPOINT: "http://127.0.0.1:18765/mcp"
+          CONFORMANCE_OUT: "${{ runner.temp }}/conformance-results"
+        run: |
+          mkdir -p "$CONFORMANCE_OUT"
+          npx --yes @modelcontextprotocol/conformance@0.2.0-alpha.10 \
+            server \
+            --url "$MCP_ENDPOINT" \
+            --suite active \
+            --spec-version 2026-07-28 \
+            --output-dir "$CONFORMANCE_OUT" \
+            --verbose \
+            2>&1 | tee "${{ runner.temp }}/conformance.log"
+
+          # Extract pass/total from summary line
+          RESULT=$(grep -E "passed|failed" "${{ runner.temp }}/conformance.log" | tail -5 || true)
+          echo "conformance_result<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$RESULT" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Stop Hub
+        if: always()
+        run: |
+          if [ -n "${HUB_PID:-}" ]; then
+            kill "$HUB_PID" 2>/dev/null || true
+          fi
+
+      - name: Upload conformance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mcp-conformance-results
+          path: ${{ runner.temp }}/conformance-results/
+          retention-days: 30
+
+      - name: Check conformance targets
+        run: |
+          LOG="${{ runner.temp }}/conformance.log"
+          echo "=== Conformance summary ==="
+          tail -30 "$LOG" || true
+
+          # Gate: ≥9 scenarios must pass (dns-rebinding + core protocol flows).
+          # Known out-of-scope failures (13 as of v0.3.0):
+          #   - resources-read-text/binary/templates-read: hub serves federated resources,
+          #     not conformance-test sentinel URIs; empty results are expected.
+          #   - prompts-get-*: same — federated prompts require real backend args.
+          #   - tools-call-image/audio/embedded/mixed: hub meta-tools return text only.
+          #   - tools-call-with-progress: hub does not emit progress notifications.
+          #   - completion-complete: completion API not implemented in SDK mode.
+          PASSED=$(grep -E "^Total:" "$LOG" | grep -oE "[0-9]+ passed" | grep -oE "[0-9]+" || echo "0")
+          echo "Passed scenarios: $PASSED"
+          if [ "${PASSED:-0}" -lt "9" ]; then
+            echo "::error::MCP conformance regression: expected ≥9 scenarios passing, got ${PASSED}. Check artifact for details."
+            exit 1
+          fi

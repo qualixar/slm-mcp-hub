@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -289,23 +288,6 @@ class TestMCPConnection:
         conn = MCPConnection(self._make_config())
         with pytest.raises(ConnectionError, match="not connected"):
             await conn.call_tool("test", {})
-
-    @pytest.mark.asyncio
-    async def test_send_notification_not_connected(self):
-        conn = MCPConnection(self._make_config())
-        with pytest.raises(ConnectionError, match="not connected"):
-            await conn._send_notification("test", {})
-
-    @pytest.mark.asyncio
-    async def test_disconnect_fails_pending(self):
-        conn = MCPConnection(self._make_config())
-        loop = asyncio.get_event_loop()
-        future = loop.create_future()
-        conn._pending[1] = future
-        await conn.disconnect()
-        assert future.done()
-        with pytest.raises(ConnectionError):
-            future.result()
 
 
 # ===========================================================================

@@ -9,10 +9,12 @@ import pytest
 from slm_mcp_hub.server.proxy_endpoint import ProxyEndpoint
 
 
-def _connection(*, connected: bool = True) -> MagicMock:
+def _connection(*, connected: bool = True, auth_required: bool = False) -> MagicMock:
     connection = MagicMock()
     connection.name = "backend"
     connection.is_connected = connected
+    connection.is_auth_required = auth_required
+    connection.negotiated_peer = None  # no SDK peer in unit tests (uses fallback version)
     connection.capabilities = {
         "tools": [{"name": "echo", "inputSchema": {"type": "object"}}],
         "resources": [{"uri": "file:///one"}],
@@ -229,3 +231,17 @@ def test_list_available_servers_reports_capability_counts() -> None:
         "resources": 1,
         "prompts": 1,
     }]
+
+
+@pytest.mark.asyncio
+async def test_auth_required_returns_auth_error() -> None:
+    """AUTH_REQUIRED state surfaces as -32003 (distinct from -32002 not-connected).
+
+    This is threaded through in P04 so P06 (OAuth) can set the state and
+    clients receive a meaningful error code rather than a generic disconnect.
+    """
+    connection = _connection(connected=False, auth_required=True)
+    request = {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}
+    result = await _endpoint(connection).handle_jsonrpc("backend", request)
+    assert result["error"]["code"] == -32003
+    assert "authentication" in result["error"]["message"]
