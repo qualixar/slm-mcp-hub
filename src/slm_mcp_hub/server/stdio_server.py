@@ -13,6 +13,12 @@ The transport reuses HubRuntime's MCPEndpoint (same as HTTP transport) and
 subscribes to the runtime's notifier so it can forward
 `notifications/tools/list_changed` to the client when the federated
 registry changes.
+
+P03 addition: ``SdkStdioServer`` wraps the official ``mcp.server.stdio.stdio_server()``
+context manager + ``Server.run()`` so the Hub can speak the 2026-07-28 wire protocol
+over stdio without hand-rolling JSON-RPC dispatch.  It accepts a pre-built
+``mcp.server.lowlevel.Server`` (produced by ``build_sdk_server()`` in
+``protocol/inbound.py``) and delegates all business logic to ``HubProductOperations``.
 """
 
 from __future__ import annotations
@@ -22,7 +28,10 @@ import json
 import logging
 import os
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from mcp.server.lowlevel import Server as SdkServer
 
 logger = logging.getLogger(__name__)
 
@@ -202,5 +211,65 @@ class StdioServer:
         # other python code, third-party libraries, or click from writing to stdout.
         sys.stdout = sys.stderr
         sys.__stdout__ = sys.stderr  # type: ignore[misc,assignment]
-        
+
         return reader, writer
+
+
+# ---------------------------------------------------------------------------
+# P03: SdkStdioServer — official SDK transport over stdio
+# ---------------------------------------------------------------------------
+
+
+class SdkStdioServer:
+    """Serve MCP over stdin/stdout using the official SDK transport.
+
+    Uses ``mcp.server.stdio.stdio_server()`` to manage stdin/stdout
+    redirection and frame parsing, then delegates to an
+    ``mcp.server.lowlevel.Server`` for JSON-RPC dispatch.
+
+    This is the stdio counterpart of the HTTP SDK path in ``http_server.py``.
+    All business logic is handled by the ``Server`` (built via
+    ``build_sdk_server()`` in ``protocol/inbound.py``) which delegates to
+    ``HubProductOperations``.
+
+    Usage::
+
+        sdk_server = build_sdk_server(ops)
+        stdio_srv = SdkStdioServer(sdk_server=sdk_server)
+        anyio.run(stdio_srv.run)
+
+    Security:
+    - No secrets stored; no auth tokens in this class.
+    - SDK handles MCP-level auth (initialize handshake).
+    - Stdout protection is delegated to ``stdio_server()`` which redirects
+      fd 0 and fd 1 to null devices while serving.
+    """
+
+    def __init__(self, sdk_server: SdkServer) -> None:  # type: ignore[type-arg]
+        """
+        Args:
+            sdk_server: A configured ``mcp.server.lowlevel.Server`` instance,
+                typically produced by ``build_sdk_server(ops)`` from
+                ``protocol/inbound.py``.
+        """
+        self._sdk_server = sdk_server
+
+    async def run(self) -> None:
+        """Run the SDK stdio server until the client closes the connection.
+
+        Wraps stdin/stdout with the official SDK's ``stdio_server()`` context,
+        then calls ``Server.run()`` with the SDK initialization options.
+
+        This coroutine is intended to be the top-level entry point; run it via
+        ``anyio.run(srv.run)`` or ``asyncio.run(srv.run())``.
+        """
+        from mcp.server.stdio import stdio_server as sdk_stdio_server
+
+        init_opts = self._sdk_server.create_initialization_options()
+        async with sdk_stdio_server() as (read_stream, write_stream):
+            await self._sdk_server.run(
+                read_stream,
+                write_stream,
+                init_opts,
+                raise_exceptions=False,
+            )
