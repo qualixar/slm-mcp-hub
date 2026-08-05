@@ -1,5 +1,6 @@
 # Internal planning artifacts (not for public repo)
 .backup/
+docs/release-evidence/
 
 # Python bytecode
 __pycache__/

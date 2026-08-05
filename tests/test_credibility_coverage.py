@@ -331,9 +331,17 @@ class TestOperationalCli:
             mcp_endpoint=object(), session_manager=object(), proxy=object(), registry=SimpleNamespace(tool_count=2),
             reloader=object(), conn_manager=SimpleNamespace(connected_count=0),
         )
-        runtime.connect_all = AsyncMock(return_value={"calendar": "initial failure"})
+        # W2-P2: CLI now calls start_background_connect(post_connect=...) + stop().
+        # Simulate by scheduling the post_connect hook so it runs during serve().
         runtime.conn_manager.fast_retry_failed = AsyncMock(return_value=retry_result)
-        runtime.disconnect_all = AsyncMock()
+        runtime.stop = AsyncMock()
+
+        def fake_start_bg(*, post_connect=None):
+            if post_connect is not None:
+                import asyncio as _asyncio
+                _asyncio.create_task(post_connect({"calendar": "initial failure"}))
+
+        runtime.start_background_connect = fake_start_bg
         hub_context = MagicMock()
         hub_context.__aenter__ = AsyncMock(return_value=hub)
         hub_context.__aexit__ = AsyncMock(return_value=False)
@@ -358,7 +366,7 @@ class TestOperationalCli:
 
         assert result.exit_code == 0
         assert expected in result.output
-        runtime.disconnect_all.assert_awaited_once()
+        runtime.stop.assert_awaited_once()
 
     def test_mcp_stdio_connects_and_disconnects_without_writing_stdout(
         self, monkeypatch: pytest.MonkeyPatch
@@ -367,8 +375,8 @@ class TestOperationalCli:
         runtime = MagicMock(
             mcp_endpoint=object(), session_manager=object(), notifier=object(),
         )
-        runtime.connect_all = AsyncMock(return_value={})
-        runtime.disconnect_all = AsyncMock()
+        # W2-P2: CLI now calls start_background_connect() (sync) and stop() (async).
+        runtime.stop = AsyncMock()
         stdio_server = MagicMock()
         stdio_server.serve = AsyncMock()
         hub_context = MagicMock()
@@ -386,7 +394,7 @@ class TestOperationalCli:
 
         assert result.exit_code == 0
         assert result.output == ""
-        runtime.disconnect_all.assert_awaited_once()
+        runtime.stop.assert_awaited_once()
         stdio_server.serve.assert_awaited_once()
 
     def test_config_snapshot_and_restore_commands_show_actionable_outcomes(

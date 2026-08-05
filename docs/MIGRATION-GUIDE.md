@@ -1,12 +1,77 @@
-# Migration Guide: Direct MCPs to SLM MCP Hub
+# Migration Guide
 
-This guide walks you through migrating from direct MCP connections to the hub. The process is safe, reversible, and takes about 5 minutes.
+## v0.2.x → v0.3.0
 
-## Before You Start
+v0.3.0 changes the transport default and adds several new configuration fields.
+Most existing setups work without changes — the breaking items are listed first.
 
-### What You Have Now
+### Breaking: transport default is now stateless
 
-Your `~/.claude.json` has MCP entries like this:
+In v0.2.x, the hub defaulted to stateful sessions. `SLM_HUB_STATELESS=1` was
+used to switch to stateless.
+
+In v0.3.0, **stateless is the default**. `SLM_HUB_STATELESS` is no longer the
+relevant variable. If your setup relied on stateful sessions (for resumable
+streaming or session-keyed state), add:
+
+```bash
+export SLM_HUB_STATEFUL=1
+```
+
+Or in config:
+
+```json
+{
+  "transport_stateful": true
+}
+```
+
+If your setup had `SLM_HUB_STATELESS=1` set, remove it — the hub is already
+stateless by default in v0.3.0.
+
+### New config fields
+
+| Field | Default | What it does |
+|---|---|---|
+| `transport_stateful` | `false` | Enables stateful sessions (resumable streaming). |
+| `timeout_class` (per server) | `"default"` | `fast`/`default`/`extended`/`unbounded` — replaces the flat 120 s ceiling. |
+| `max_live_backends` | unlimited | LRU cap on live backend subprocesses. |
+
+### New behavior
+
+**Unified call pipeline.** All tool calls now flow through a single dispatch
+path with a per-backend concurrency gate (default 10 concurrent per backend)
+and timeout class resolution. The per-backend gate prevents one slow server from
+blocking calls to the others — this was the primary cause of head-of-line
+blocking in v0.2.x.
+
+**Progress forwarding.** Backend `notifications/progress` events are now
+forwarded to the hub's client in real time. No config change required.
+
+**Resumable streaming.** Available in stateful mode only. Client↔hub resumption
+is handled by the SDK automatically. The hub→backend one-shot retry fires only
+when a resumption token was captured — the call does not retry blindly. In the
+default stateless mode there is no resumption.
+
+**Observability.** New endpoints and CLI commands: `GET /api/servers/enriched`,
+`GET /api/events` (SSE), admin dashboard at `/admin`, and CLI `slm-hub servers`,
+`slm-hub health`, `slm-hub warm`, `slm-hub stop`. All require the hub API key.
+
+### Dependency change
+
+`mcp==2.0.0`, `keyring>=25.7,<26`, and `filelock>=3.32,<4` are now required.
+`pip install slm-mcp-hub` pulls them automatically.
+
+---
+
+## Direct MCPs → SLM MCP Hub
+
+This section covers migrating from per-session direct MCP connections to the hub.
+The process is reversible and takes about 5 minutes.
+
+### Before you start
+
+#### What you have now
 
 ```json
 {
@@ -33,9 +98,9 @@ Your `~/.claude.json` has MCP entries like this:
 }
 ```
 
-Each session spawns all these as separate processes. 5 sessions = 5x the processes.
+Each session spawns all these as separate processes. Five sessions = 5× the subprocesses.
 
-### What You'll Have After
+#### What you will have after
 
 ```json
 {
@@ -58,92 +123,85 @@ Each session spawns all these as separate processes. 5 sessions = 5x the process
 
 Same keys. Same tool names. One hub manages everything.
 
-## Step-by-Step Migration
+### Step-by-step migration
 
-### 1. Install the Hub
+#### 1. Install the hub
 
 ```bash
 pip install slm-mcp-hub
 ```
 
-### 2. Import Your MCPs
+#### 2. Import your MCPs
 
 ```bash
 slm-hub setup import ~/.claude.json
 ```
 
-This reads your MCP definitions and copies them into `~/.slm-mcp-hub/config.json`. Your claude.json is NOT modified.
+This reads your MCP definitions and copies them into `~/.slm-mcp-hub/config.json`.
+Your `claude.json` is not modified.
 
-### 3. Start the Hub
+#### 3. Start the hub
 
 ```bash
 slm-hub start
 ```
 
-Watch the output. You should see all your MCPs connecting:
+Watch the output — you should see all your backends connecting:
 
 ```
-SLM MCP Hub v0.2.6 running on http://127.0.0.1:52414/mcp
+SLM MCP Hub v0.3.0 running on http://127.0.0.1:52414/mcp
   MCP servers: 38/38 connected
   Tools: 462
 ```
 
-If some fail, check:
-- Are the commands installed? (`npx`, `uvx`, `node` must be in PATH)
-- Are environment variables set? The hub loads `~/.claude-secrets.env`
-- Is the MCP server compatible? Check `slm-hub start --log-level DEBUG` for details
+If some fail:
+- Are the executables installed? (`npx`, `uvx`, `node` must be in `PATH`)
+- Are environment variables set? The hub loads `~/.claude-secrets.env`.
+- Run `slm-hub start --log-level DEBUG` to see connection details.
 
-### 4. Verify Before Migrating
-
-Test that tools work through the hub:
+#### 4. Verify before migrating
 
 ```bash
-# Check health
 curl http://127.0.0.1:52414/api/health
-
-# List all servers and their tools
-curl http://127.0.0.1:52414/api/servers
+curl http://127.0.0.1:52414/api/servers/enriched
 ```
 
-### 5. Migrate Claude Code
+#### 5. Migrate your client
 
 ```bash
-# Preview what will change (no files modified)
+# Preview (no files modified)
 slm-hub setup register --client claude_code --mode transparent --dry-run
 
-# Apply (creates backup automatically)
+# Apply (creates backup automatically at ~/.claude.json.pre-hub-backup)
 slm-hub setup register --client claude_code --mode transparent
 ```
 
-A backup is created at `~/.claude.json.pre-hub-backup`.
-
-### 6. Restart Claude Code
+#### 6. Restart your client
 
 Close and reopen your Claude Code session. All tools work identically.
 
-### 7. Migrate Other Clients (Optional)
+#### 7. Migrate other clients (optional)
 
 ```bash
 slm-hub setup register --all --mode transparent
 ```
 
-This migrates Claude Code, VS Code Copilot, Cursor, Windsurf, and Codex CLI — any that are installed.
+This covers Claude Code, VS Code Copilot, Cursor, Windsurf, and Codex CLI.
 
-## Rollback
-
-At any point, restore your original config:
+### Rollback
 
 ```bash
 cp ~/.claude.json.pre-hub-backup ~/.claude.json
 ```
 
-Restart Claude Code. You're back to direct connections. The hub can be stopped with Ctrl+C.
+Restart your client. You are back to direct connections.
 
-## Special Cases
+### Special cases
 
-### MCPs with OAuth Sessions (e.g., Google Workspace)
+#### MCPs with browser-based OAuth sessions
 
-Some MCPs maintain OAuth sessions that are tied to the specific process. If an MCP uses browser-based OAuth login, keep it as a direct connection:
+Some MCPs maintain OAuth sessions tied to the specific process. Keep them as
+direct connections while routing everything else through the hub:
 
 ```json
 {
@@ -151,7 +209,7 @@ Some MCPs maintain OAuth sessions that are tied to the specific process. If an M
     "google-workspace": {
       "command": "uvx",
       "args": ["google-workspace-mcp"],
-      "env": { ... }
+      "env": { }
     },
     "everything-else": {
       "type": "http",
@@ -161,52 +219,26 @@ Some MCPs maintain OAuth sessions that are tied to the specific process. If an M
 }
 ```
 
-### Adding New MCPs After Migration
+#### Adding new backends after migration
 
-Add new MCPs directly to the hub config, not to claude.json:
-
-```bash
-# Edit hub config
-slm-hub config show   # See current config
-
-# Or add to ~/.slm-mcp-hub/config.json directly:
-{
-  "mcpServers": {
-    "new-mcp": {
-      "command": "npx",
-      "args": ["-y", "new-mcp-server"]
-    }
-  }
-}
-```
-
-Then add the proxy entry to claude.json:
-
-```json
-{
-  "new-mcp": {
-    "type": "http",
-    "url": "http://127.0.0.1:52414/mcp/new-mcp"
-  }
-}
-```
-
-Restart the hub (`slm-hub start`) and Claude Code.
-
-### Running Hub as a Service
-
-#### macOS (launchd)
+Add new backends to the hub config, not to `claude.json`:
 
 ```bash
-# Generate and install launchd plist
+slm-hub server add new-backend --command npx --arg -y --arg new-mcp-server
+```
+
+Then add the proxy entry to `claude.json` (transparent mode) or just use
+`call_tool("new-backend__tool_name", {...})` in federated mode.
+
+#### Running the hub as a service
+
+**macOS (launchd)**
+
+```bash
 slm-hub setup --launchd
 ```
 
-The hub will auto-start on login and restart on crash.
-
-#### Linux (systemd)
-
-Create `/etc/systemd/user/slm-mcp-hub.service`:
+**Linux (systemd)**
 
 ```ini
 [Unit]
@@ -227,22 +259,11 @@ systemctl --user enable slm-mcp-hub
 systemctl --user start slm-mcp-hub
 ```
 
-## Verifying the Migration
+### Verifying the migration
 
-After migration, verify everything works:
-
-1. **Tool names unchanged:** Run `/context` in Claude Code. All MCP tools should show the same names as before (e.g., `mcp__context7__query-docs`).
-
-2. **Tools respond:** Call any tool. The response should be identical.
-
-3. **Hub is proxying:** Check the hub log:
-   ```bash
-   tail -f ~/.slm-mcp-hub/hub.log
-   ```
-   You'll see tool calls flowing through the hub.
-
-4. **RAM reduced:** Check process count:
-   ```bash
-   ps aux | grep -c "mcp"
-   ```
-   Should be ~39 (38 MCPs + 1 hub) regardless of how many Claude sessions are open.
+1. **Tool names unchanged:** All MCP tools should show the same names as before
+   (e.g. `mcp__context7__query-docs`).
+2. **Tools respond:** Call any tool — responses should be identical.
+3. **Hub is routing:** Check the hub log: `tail -f ~/.slm-mcp-hub/hub.log`
+4. **RAM reduced:** `ps aux | grep -c "mcp"` should be ~39 regardless of how
+   many client sessions are open.

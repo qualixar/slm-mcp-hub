@@ -2,46 +2,132 @@
 
 ## The Problem
 
-Without a hub, every AI client session spawns its own MCP processes:
+Without a hub, every AI client session spawns its own MCP subprocesses:
 
 ```
-Claude Session 1  →  38 MCP processes  (~2GB RAM)
-Claude Session 2  →  38 MCP processes  (~2GB RAM)
-VS Code Copilot   →  38 MCP processes  (~2GB RAM)
-Cursor            →  38 MCP processes  (~2GB RAM)
-Agent Team (x3)   →  38 MCP processes  (~2GB RAM each)
+Claude Session 1  →  38 MCP processes  (~2 GB RAM)
+Claude Session 2  →  38 MCP processes  (~2 GB RAM)
+VS Code Copilot   →  38 MCP processes  (~2 GB RAM)
+Cursor            →  38 MCP processes  (~2 GB RAM)
+Agent Team (x3)   →  38 MCP processes  (~2 GB RAM each)
                      ─────────────────
-                     266 processes, ~13GB RAM
+                     266 processes, ~13 GB RAM
 ```
 
-Each session starts from zero. No shared state, no caching, no coordination.
+Each session starts from zero. No shared backends, no coordination.
 
 ## The Solution
 
-With the hub, one process manages all MCPs. Every client connects to the hub:
+One hub process manages all MCP backends. Every client connects to the hub:
 
 ```
 Claude Session 1  ──┐
 Claude Session 2  ──┤
-VS Code Copilot   ──┼──→  SLM MCP Hub (1 process)  →  38 MCP processes
+VS Code Copilot   ──┼──→  SLM MCP Hub (1 process)  →  38 MCP backends
 Cursor            ──┤         │                          (shared)
 Agent Team (x3)   ──┘         │
-                              ├── Cache (dedup API calls)
-                              ├── Cost tracking (budgets)
-                              ├── SLM Plugin (learning)
-                              ├── Mesh Plugin (coordination)
-                              └── Observability (metrics)
+                              ├── Unified call pipeline (gate + timeout + metrics)
+                              ├── RAM governance (lazy spawn / eviction)
+                              ├── Observability (p95, dashboard, SSE events)
+                              ├── SLM Plugin (session learning)
+                              └── Mesh Plugin (cross-machine coordination)
                      ─────────────────
-                     39 processes, ~2GB RAM
+                     39 processes, ~2 GB RAM
 ```
 
-## Two Modes
+## Transport Mode
 
-The hub supports two modes simultaneously on the same process.
+### Stateless (default)
 
-### Federated Mode (Recommended)
+Modern MCP `2026-07-28`. No session tracking, no server-side event store. Requests are handled per-call — no `Mcp-Session-Id` required. This is the right default: the hub can restart cleanly with no state to recover.
 
-**Endpoint:** `/mcp` — One entry in claude.json. 3 meta-tools. Massive token savings.
+### Stateful (opt-in)
+
+Set `SLM_HUB_STATEFUL=1` or `transport_stateful: true`. The SDK's
+`StreamableHTTPSessionManager` runs with `stateless=False`, activating
+`InMemoryEventStore` for resumable streaming. The client↔hub `Last-Event-ID`
+reconnect path is handled automatically by the SDK. The hub→backend resumable
+retry (see below) is layered on top.
+
+## Unified Call Pipeline
+
+Every tool call flows through one dispatch path in `FederationRouter._dispatch_call`:
+
+```
+call arrives
+    │
+    ▼
+_resolve_connection_async
+    │  registry lookup + live connection check
+    │  transparent on-demand reconnect if backend was evicted
+    ▼
+BackendConcurrencyGate.acquire(server_name)
+    │  per-backend CapacityLimiter (default 10 concurrent calls)
+    │  prevents one slow backend from blocking calls to others
+    ▼
+timeout class resolution
+    │  fast=30s / default=120s / extended=600s / unbounded=None
+    │  per-server config; override_s takes precedence
+    ▼
+streaming vs. non-streaming dispatch
+    │  non-streaming: conn.call_tool (backward-compatible default)
+    │  streaming: conn.call_tool_streaming when progress_callback,
+    │             resumption_context, or non-default timeout_class
+    ▼
+run_with_safe_resume (streaming path)
+    │  token-gated one-shot retry on CONNECTION_CLOSED
+    │  no token captured → fail cleanly, no retry
+    ▼
+MetricsCollector.record(server_name, duration_ms, success)
+    │  p95 latency + call count, per backend
+    ▼
+activity_fn(server_name)
+    │  resets idle reaper timestamp on call completion
+    ▼
+RouteResult → caller
+```
+
+Metrics and activity tracking are fail-open: a bug in either never breaks a real call.
+
+## Resumable Streaming
+
+Two distinct resumption mechanisms, each covering a different leg:
+
+**Client↔Hub (SDK, stateful mode only)**
+The SDK's `InMemoryEventStore` stores outbound SSE events. When a client
+reconnects with `Last-Event-ID`, the SDK replays the stored events
+automatically. This is off in stateless mode — there is no event store.
+
+**Hub→Backend (safe token-gated, stateful mode)**
+When a backend connection drops mid-stream (`MCPError code=CONNECTION_CLOSED`),
+the router retries once if and only if the backend had issued a resumption token.
+A token means the backend acknowledged progress and can continue from that point.
+Without a token, the call fails cleanly — the hub does not blindly re-execute a
+tool whose idempotency is unknown. The retry is bounded at one attempt.
+
+## RAM Governance
+
+```
+spawn: lazy (default)
+    hub startup: connect, harvest tools, disconnect subprocess
+    first routed call: reconnect transparently
+    idle past idle_ttl_seconds: evict subprocess, tools stay registered
+    max_live_backends exceeded: evict LRU non-pinned backend
+
+spawn: pinned (always_on)
+    subprocess stays alive; idle eviction does not apply
+```
+
+Evicted backends remain discoverable through the capability registry. The next
+call reconnects them without client intervention.
+
+## Routing Modes
+
+Two modes run on the same hub process simultaneously.
+
+### Federated Mode
+
+**Endpoint:** `/mcp` — one entry in the client config.
 
 ```json
 {
@@ -51,130 +137,104 @@ The hub supports two modes simultaneously on the same process.
 }
 ```
 
-Claude gets 3 meta-tools: `hub__search_tools`, `hub__call_tool`, `hub__list_servers`. All 345+ tools discoverable and callable through these 3.
+Three meta-tools: `search_tools`, `call_tool`, `list_servers`. All backends
+discoverable and callable through these three. Namespace: `server__tool`.
+Backward-compatible `hub__` prefix aliases accepted.
 
-**Best for:** Production use, small-context models, cost optimization, SLM integration.
+Use when context size matters or when many backends are connected.
 
 ### Transparent Proxy Mode
 
-**Endpoint:** `/mcp/{server_name}` — Per-server entries. Original tool names. Zero behavior change.
+**Endpoint:** `/mcp/{server_name}` — one entry per backend.
 
 ```json
 {
   "mcpServers": {
-    "context7": {"type": "http", "url": "http://127.0.0.1:52414/mcp/context7"},
-    "github": {"type": "http", "url": "http://127.0.0.1:52414/mcp/github"}
+    "github":   {"type": "http", "url": "http://127.0.0.1:52414/mcp/github"},
+    "context7": {"type": "http", "url": "http://127.0.0.1:52414/mcp/context7"}
   }
 }
 ```
 
-**Best for:** Migration testing, tool name compatibility.
+Original tool names, zero behavior change. Use for migration testing or when
+a client requires the backend's native tool surface.
 
-## How Tool Calls Flow
+## Observability
 
-### Federated Mode
+The hub exposes three observability surfaces:
 
-```
-1. Claude calls hub__call_tool(tool="github__search_repositories", arguments={...})
-2. Claude Code sends JSON-RPC to http://127.0.0.1:52414/mcp
-3. Hub looks up "github__search_repositories" in the capability registry
-4. Registry maps it to the GitHub MCP server
-5. Hub forwards to GitHub MCP process (stdin/stdout)
-6. Result returns to Claude
-7. Hub plugin fires on_tool_call_after → logs to SLM learning pipeline
-```
+| Surface | Access | Data |
+|---|---|---|
+| `GET /api/servers/enriched` | API key required | Per-backend state, uptime, restart count, tool count, p95 latency |
+| `GET /api/events` | API key required | SSE stream of lifecycle events (connect, disconnect, error, evict) |
+| Admin dashboard | `http://127.0.0.1:52414/admin` | Same as enriched, rendered as HTML |
 
-### Transparent Proxy Mode
+CLI mirrors: `slm-hub servers`, `slm-hub health`, `slm-hub warm <server>`,
+`slm-hub stop <server>`.
 
-```
-1. Claude calls mcp__context7__query-docs
-2. Claude Code sends JSON-RPC to http://127.0.0.1:52414/mcp/context7
-3. Hub forwards to context7 MCP process
-4. Result returns UNMODIFIED
-5. Hub plugin fires on_tool_call_after → logs to SLM learning pipeline
-```
-
-In both modes, the SLM plugin sees every tool call and logs it to the learning pipeline.
+The unauthenticated `/api/health` endpoint reports only status and version.
 
 ## Plugin System
 
-The hub has a plugin architecture that auto-discovers plugins via Python entry_points on startup.
+Plugins auto-discover via Python `entry_points` on startup. Errors in one plugin
+do not affect the hub or other plugins.
 
 ### Plugin Lifecycle Hooks
 
 ```python
 class HubPlugin(ABC):
-    async def on_hub_start(self, hub) -> None: ...      # Hub starting up
-    async def on_hub_stop(self) -> None: ...             # Hub shutting down
-    async def on_tool_call_after(self, ...) -> None: ... # After every tool call
-    async def on_session_start(self, ...) -> None: ...   # New client connected
-    async def on_session_end(self, ...) -> None: ...     # Client disconnected
-    async def on_mcp_connect(self, ...) -> None: ...     # MCP server connected
-    async def on_mcp_disconnect(self, ...) -> None: ...  # MCP server disconnected
+    async def on_hub_start(self, hub) -> None: ...
+    async def on_hub_stop(self) -> None: ...
+    async def on_tool_call_after(self, ...) -> None: ...
+    async def on_session_start(self, ...) -> None: ...
+    async def on_session_end(self, ...) -> None: ...
+    async def on_mcp_connect(self, ...) -> None: ...
+    async def on_mcp_disconnect(self, ...) -> None: ...
 ```
 
-### Built-In Plugins
+### SLM Plugin
 
-#### SLM Plugin
+Connects to the SuperLocalMemory daemon at `localhost:8765` via HTTP.
 
-Connects to the SuperLocalMemory daemon via HTTP API (`localhost:8765`).
+| Hook | Action |
+|---|---|
+| `on_hub_start` | Health check; disables plugin if daemon is unavailable |
+| `on_tool_call_after` | Logs tool call to the SLM learning pipeline |
+| `on_session_start` | Recalls context from past sessions |
+| `on_session_end` | Logs session summary |
 
-| Hook | Action | Endpoint |
-|:-----|:-------|:---------|
-| `on_hub_start` | Check daemon health, set `_available` | `GET /status` |
-| `on_tool_call_after` | Log tool call to learning pipeline | `POST /api/v3/tool-event` |
-| `on_session_start` | Recall context from past sessions | `POST /api/v3/recall/trace` |
-| `on_session_end` | Log session summary | `POST /api/v3/tool-event` |
+When SLM is not installed or the daemon is not running, all hooks are no-ops.
+The hub works fully standalone.
 
-The plugin also maintains a local ring buffer (10K observations) for `get_learned_tools()` and `get_warm_up_predictions()` — these work even without the SLM daemon.
-
-When SLM is not installed or the daemon isn't running, all hooks are no-ops. The hub works fully standalone.
-
-#### Mesh Plugin
+### Mesh Plugin
 
 Connects to the SLM daemon's mesh endpoints (`localhost:8765/mesh/*`).
-
-| Hook | Action | Endpoint |
-|:-----|:-------|:---------|
-| `on_hub_start` | Register as mesh peer | `POST /mesh/register` |
-| `on_tool_call_after` | Broadcast tool usage | `POST /mesh/send` |
-| `on_session_start` | Notify peers | `POST /mesh/send` |
-| `on_session_end` | Notify peers | `POST /mesh/send` |
-| `on_mcp_connect` | Broadcast tool list change | `POST /mesh/send` |
-
-Distributed locking via `POST /mesh/lock` prevents conflicts when multiple sessions access the same resource.
+Registers as a mesh peer on startup, broadcasts tool usage and session events,
+and provides distributed locking via `POST /mesh/lock` for conflict prevention
+when multiple sessions access the same resource.
 
 ### Coexistence Model
 
-The SLM daemon serves multiple consumers simultaneously:
-
 ```
-Claude Code hooks → direct MCP (stdio)    → mcp__superlocalmemory__session_init
-Hub SLM plugin   → HTTP API               → localhost:8765/api/v3/tool-event
-Hub Mesh plugin  → HTTP API               → localhost:8765/mesh/send
-SLM Dashboard    → HTTP                   → localhost:8765/
+Claude Code hooks → direct MCP (stdio)  → mcp__superlocalmemory__session_init
+Hub SLM plugin   → HTTP API             → localhost:8765/api/v3/tool-event
+Hub Mesh plugin  → HTTP API             → localhost:8765/mesh/send
+SLM Dashboard    → HTTP                 → localhost:8765/
 ```
 
-Same daemon, multiple protocols, zero conflicts.
+Same daemon, multiple access paths, no conflicts.
 
-## MCP Transport Support
+## Backend Transport Support
 
-| Transport | Status | Examples |
-|:----------|:-------|:--------|
-| **stdio** | Full support | npx, uvx, node, python commands |
-| **HTTP** | Full support | Remote MCP servers with API keys |
-| **SSE** | Full support | Servers returning text/event-stream |
+| Transport | Downstream | Upstream |
+|---|---|---|
+| stdio | Yes (`slm-hub mcp`) | Yes (command-based servers) |
+| Streamable HTTP | Yes (`/mcp`) | Yes |
+| SSE | No | Yes (no OAuth combination) |
+| OAuth 2.0 HTTP | — | Yes (`slm-hub auth login`) |
 
-## Secrets & Environment Variables
+## Secrets and Environment Variables
 
-The hub loads secrets from `~/.claude-secrets.env` on startup (same file Claude Code uses). MCP configs support `${VAR}` placeholders that resolve at startup.
-
-## What the Hub Adds (Both Modes)
-
-- **Intelligent Caching** — SHA-256 content-hash keys, TTL, LRU eviction
-- **Cost Tracking** — Per-tool costs, session budgets, cascade routing
-- **Learning** — Usage patterns, tool frequency, with SLM: persistent across sessions
-- **Cross-Session Coordination** — Distributed locks, conflict detection
-- **Observability** — Per-server metrics, request tracing, audit log
-- **Smart Tool Filtering** — Project-type detection (13 categories), frequency ranking
-- **Lifecycle Management** — Lazy startup, idle shutdown, predictive warm-up (with SLM)
+The hub loads secrets from `~/.slm-mcp-hub/secrets.env` and `~/.claude-secrets.env`
+on startup. `${VAR}` and `${env:VAR}` placeholders in config resolve only when a
+backend connection is created — the hub persists the placeholder, not the value.

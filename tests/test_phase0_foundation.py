@@ -121,6 +121,24 @@ class TestConstants:
     def test_namespace_delimiter(self):
         assert NAMESPACE_DELIMITER == "__"
 
+    def test_get_database_file_with_explicit_dir(self, tmp_dir):
+        """get_database_file with explicit dir returns path under that dir."""
+        from slm_mcp_hub.core.constants import get_database_file
+        path = get_database_file(tmp_dir)
+        assert path == tmp_dir / "hub.db"
+
+    def test_get_permissions_file_with_explicit_dir(self, tmp_dir):
+        """get_permissions_file with explicit dir returns path under that dir."""
+        from slm_mcp_hub.core.constants import get_permissions_file
+        path = get_permissions_file(tmp_dir)
+        assert path == tmp_dir / "permissions.json"
+
+    def test_get_fallback_config_file_with_explicit_dir(self, tmp_dir):
+        """get_fallback_config_file with explicit dir returns path under that dir."""
+        from slm_mcp_hub.core.constants import get_fallback_config_file
+        path = get_fallback_config_file(tmp_dir)
+        assert path == tmp_dir / "fallback-config.json"
+
 
 # ---------------------------------------------------------------------------
 # Config Tests

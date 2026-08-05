@@ -5,6 +5,95 @@ All notable changes to SLM MCP Hub will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-08-05
+
+Universal MCP hub: federate stdio, HTTP, and SSE servers — including
+OAuth-protected ones — through a single endpoint, on the official MCP Python
+SDK and the `2026-07-28` protocol, with per-backend RAM governance, long-running
+call support, and a runtime observability surface.
+
+### Added
+
+- OAuth 2.0 login for upstream MCP servers, with tokens stored in the OS
+  keychain. New `slm-hub auth` command group: `login`, `status [--json]`, and
+  `logout`. `login` is the only command that opens a browser; no command ever
+  prints a token, refresh token, client secret, or authorization code.
+- Streamable HTTP serving on the official SDK, alongside stdio, so the hub can
+  run as either transport and federate upstreams over either transport.
+- Per-backend spawn policy for RAM control. Mark a server `spawn: lazy` to
+  harvest its tools at startup and then evict it once it has been idle past
+  `idle_ttl_seconds` — freeing its subprocess while its tools stay discoverable
+  and callable; the next routed call reconnects it transparently. A
+  `max_live_backends` cap evicts the least-recently-used non-pinned backend when
+  the limit is reached. `spawn: pinned` (or `always_on`) servers stay hot.
+- Unified call pipeline with per-backend concurrency gate (default 10 concurrent
+  calls per backend) and per-server timeout classes — `fast` (30 s) /
+  `default` (120 s) / `extended` (600 s) / `unbounded`. Progress notifications
+  are forwarded from backend to client in real time on both transport modes.
+  Per-server p95 latency and call metrics are recorded on every dispatch.
+  Resumable streaming is available in stateful mode (see Transport below).
+- A runtime observability surface. `GET /api/servers/enriched` reports each
+  backend's state, uptime, restart count, and tool count; `GET /api/events`
+  streams lifecycle events over SSE without a slow reader ever stalling the hub;
+  a localhost admin dashboard renders the same table; and new CLI commands
+  `servers`, `health`, `warm`, and `stop` read status and warm or stop a backend
+  at runtime. Every admin route requires the hub API key.
+- Legacy SSE upstreams. `type: sse` servers now connect through the SSE client
+  (they were previously misrouted to the Streamable HTTP client). The
+  unsupported SSE-plus-OAuth combination is rejected at configuration time.
+- End-to-end coverage of the full transport matrix (stdio/HTTP downstream ×
+  stdio/HTTP/OAuth-HTTP/SSE upstream) and of the lazy spawn, idle eviction, and
+  on-demand reconnect cycle, exercised with real processes.
+
+### Transport
+
+The default transport mode is now **stateless** (MCP `2026-07-28`): no session
+tracking, no server-side event store, no resumable replay. This replaces the
+v0.2.x stateful default.
+
+Set `SLM_HUB_STATEFUL=1` (or `transport_stateful: true` in config) to enable
+stateful sessions. Stateful mode activates the SDK's `InMemoryEventStore` and
+allows resumable streaming on the client↔hub leg. On the hub→backend leg, a
+one-shot retry fires when a backend drops mid-stream — but only when the backend
+had issued a resumption token (meaning it can continue, not restart). Without a
+token, the call fails cleanly. Resumable streaming is a stateful-mode feature;
+in the default stateless mode there is no resumption.
+
+Migration from v0.2.x: if you relied on stateful sessions, add
+`SLM_HUB_STATEFUL=1`. Remove any `SLM_HUB_STATELESS=1` from your environment —
+it is no longer used.
+
+### Changed
+
+- Inbound and outbound MCP now run on the official `mcp==2.0.0` SDK behind a
+  transport-neutral protocol layer. Requires Python 3.11 or newer.
+- The hub continues to expose three meta-tools (`search_tools`, `call_tool`,
+  `list_servers`) as its interface; upstream tools are federated through
+  `call_tool` rather than re-listed by name.
+
+### Security
+
+- Upstream OAuth metadata and callback URLs are restricted to HTTPS or exact
+  loopback HTTP, with SSRF defenses: private/reserved/link-local and
+  IPv4-mapped IPv6 addresses are blocked, DNS-rebinding is checked across all
+  resolved IPs, and resolution failure fails closed.
+- A downstream client's `Authorization` header is never forwarded to an
+  upstream server; the hub uses only its own stored token upstream.
+- Token refresh is serialized across tasks and processes.
+- The unauthenticated health endpoint reports only status and version; it no
+  longer exposes the bind host, port, or loaded plugin names.
+- The OAuth callback host is validated as loopback at configuration time, and the
+  authorization URL's query string (which carries the CSRF `state` nonce) is kept
+  out of logs.
+- Admin dashboard output HTML-escapes every backend-derived value, and the
+  lifecycle event stream emits an explicit field allowlist — no configuration,
+  headers, tokens, or environment values reach a client.
+
+### Dependencies
+
+- Adds `mcp==2.0.0`, `keyring>=25.7,<26`, and `filelock>=3.32,<4` as runtime
+  dependencies.
+
 ## [0.2.6] - 2026-08-03
 
 ### Security
