@@ -102,6 +102,12 @@ class OutboundClient:
         }
         self._negotiated_peer: NegotiatedPeer | None = None
         self._auth_required = False
+        # Protocol era used to build the SDK Client. Starts at "auto" (probe
+        # with server/discover); pinned to "legacy" for the lifetime of this
+        # client once a backend is observed closing the connection on the
+        # probe, so reconnects and idle-eviction cycles do not re-pay the
+        # failed spawn. See _is_discover_probe_rejection.
+        self._connect_mode: str = "auto"
 
     # ------------------------------------------------------------------
     # Public properties
@@ -234,6 +240,19 @@ class OutboundClient:
                     f"run: slm-hub auth login {self._config.name}"
                 ) from exc
             await stack.aclose()
+            # Era-probe fallback: mode="auto" sends server/discover before
+            # initialize. Strict legacy servers (Rust rmcp) close the connection
+            # rather than replying -32601, which strands an otherwise healthy
+            # backend. Retry once in legacy mode and pin it for this client.
+            if self._connect_mode == "auto" and self._is_discover_probe_rejection(exc):
+                logger.info(
+                    "%s closed the connection on the protocol-era probe; "
+                    "retrying in legacy mode",
+                    self._config.name,
+                )
+                self._connect_mode = "legacy"
+                await self.connect()
+                return
             raise ConnectionError(
                 f"MCP {self._config.name} initialization failed"
                 f" ({type(exc).__name__})"
@@ -422,6 +441,37 @@ class OutboundClient:
             return self._build_sse_client(runtime)
         return self._build_http_client(runtime)
 
+    @staticmethod
+    def _is_discover_probe_rejection(exc: BaseException) -> bool:
+        """True when a failure looks like the era probe killing a legacy server.
+
+        ``Client(mode="auto")`` sends ``server/discover`` before ``initialize``
+        to detect the protocol era. Servers that answer with ``-32601 Method not
+        found`` are handled by the SDK; Rust ``rmcp``-based servers instead treat
+        the unknown pre-initialize method as a protocol violation and **close the
+        connection**, which surfaces as ``MCPError(-32000, 'Connection closed')``
+        nested inside one or more ``ExceptionGroup``s.
+
+        Matching is deliberately narrow. A broad "retry on any failure" would
+        mask genuine connection errors behind a second, slower attempt.
+        """
+        stack: list[BaseException] = [exc]
+        seen: set[int] = set()
+        while stack:
+            current = stack.pop()
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            if isinstance(current, BaseExceptionGroup):
+                stack.extend(current.exceptions)
+                continue
+            if "closed" in str(current).lower():
+                return True
+            for chained in (current.__cause__, current.__context__):
+                if chained is not None:
+                    stack.append(chained)
+        return False
+
     def _build_stdio_client(self, runtime: MCPServerConfig) -> Client:
         """Build a Client wrapping stdio_client transport.
 
@@ -437,7 +487,7 @@ class OutboundClient:
             args=list(runtime.args),
             env=env,
         )
-        return Client(stdio_client(params), mode="auto")
+        return Client(stdio_client(params), mode=self._connect_mode)
 
     def _build_sse_client(self, runtime: MCPServerConfig) -> Client:
         """Build a Client wrapping the legacy SSE transport (mcp.client.sse.sse_client).

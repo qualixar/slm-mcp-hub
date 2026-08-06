@@ -5,6 +5,40 @@ All notable changes to SLM MCP Hub will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.3] - 2026-08-06
+
+### Fixed
+
+- **Strict legacy stdio backends no longer fail to connect.** SDK 2.0.0's
+  `Client(mode="auto")` sends `server/discover` before `initialize` to detect the
+  protocol era. Servers that answer with `-32601 Method not found` are handled
+  fine, but Rust `rmcp`-based servers treat an unknown pre-initialize method as a
+  protocol violation and **close the connection**. The probe therefore killed the
+  backend, and the hub reported only `initialization failed (ExceptionGroup)` —
+  the real cause, `MCPError(-32000, 'Connection closed')`, was buried two
+  exception groups deep.
+
+  The hub now retries once in `legacy` mode when a backend closes the connection
+  during the era probe, and pins that mode for the lifetime of the client so
+  reconnects and idle-eviction cycles do not re-pay the failed spawn. `auto`
+  remains the default: era detection is preserved for the backends that support
+  it, and only servers that demonstrably reject the probe are downgraded.
+
+  The retry is deliberately narrow — it fires only on a closed-connection
+  failure, so genuine connection errors still surface immediately instead of
+  being masked behind a second attempt.
+
+  Found in production against `pplx-mcp` 0.11.0 (rmcp), which failed every
+  connection under `auto` while 24 of 26 other stdio backends were unaffected.
+
+### Added
+
+- `tests/test_legacy_era_fallback.py` plus a `strict_legacy_server.py` fixture
+  that reproduces the rmcp behaviour — a stdio server that exits non-zero on any
+  pre-`initialize` method. A second test asserts the fixture really does close on
+  the probe, so the regression test cannot start passing for the wrong reason if
+  the fixture ever softens.
+
 ## [0.3.2] - 2026-08-06
 
 ### Changed
