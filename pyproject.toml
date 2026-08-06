@@ -36,12 +36,15 @@ dependencies = [
 
 [project.optional-dependencies]
 network = ["zeroconf>=0.131.0"]
-slm = ["superlocalmemory>=3.4.0"]
-mesh = ["superlocalmemory>=3.4.0"]
-full = ["superlocalmemory>=3.4.0"]
 # W5-P1: psutil for optional RAM monitoring of stdio backends.
 # Install via: pip install slm-mcp-hub[observability]
 observability = ["psutil>=5.9.0"]
+# The SLM and mesh plugins are pure HTTP clients against the SuperLocalMemory
+# daemon (SLM_DAEMON_URL) — they import no Python package. The removed `slm`
+# and `mesh` extras pulled superlocalmemory (and its transformer stack) in for
+# an import that has not existed since the v0.1.0 plugin rewrite. `full` is now
+# the union of the extras the hub actually uses.
+full = ["zeroconf>=0.131.0", "psutil>=5.9.0"]
 dev = [
     "build>=1.2",
     "mypy>=1.15",

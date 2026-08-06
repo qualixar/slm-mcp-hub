@@ -5,6 +5,37 @@ All notable changes to SLM MCP Hub will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.2] - 2026-08-06
+
+### Changed
+
+- **The hub no longer installs a memory engine in order to talk to one.** The
+  `slm` and `mesh` extras declared `superlocalmemory>=3.4.0`, a leftover of the
+  v0.1.0 plugin that called `superlocalmemory.get_engine()` before it was
+  rewritten to speak to the SLM daemon over HTTP. No Python code in the hub has
+  imported `superlocalmemory` since that rewrite, and the documented integration
+  path never used the extras. Both extras are removed.
+
+  The cost was not cosmetic: `pip install slm-mcp-hub[full]` resolved
+  `superlocalmemory` and its transformer stack — `sentence-transformers`,
+  `transformers`, `onnxruntime` — and could shadow a user's own SuperLocalMemory
+  installation with an older one. SLM and mesh support are unchanged; both
+  plugins are HTTP clients configured through `SLM_DAEMON_URL`, and the hub now
+  works with any SLM release rather than a pinned floor.
+
+- `full` is now the union of the extras the hub actually uses — `network`
+  (zeroconf) and `observability` (psutil). `pip install slm-mcp-hub[full]`
+  keeps working; it just installs what it claims to.
+
+- Extras are documented in the README install section for the first time.
+
+### Added
+
+- `test_no_extra_depends_on_superlocalmemory` and
+  `test_full_extra_is_the_union_of_real_extras` in `tests/test_release_metadata.py`:
+  mechanical guards that fail the build if the dependency is reintroduced to any
+  extra, rather than relying on review to catch it.
+
 ## [0.3.1] - 2026-08-05
 
 ### Fixed

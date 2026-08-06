@@ -19,8 +19,10 @@ Qualixar's work on AI Reliability Engineering.
 Windsurf, Claude Desktop, custom agents) against a shared set of servers — or
 anyone whose machine is buckling under duplicate MCP subprocesses.
 
-> **Alpha software.** The interfaces work and are tested, but they can still
-> change between releases. Please file reproducible failures through
+> **Alpha software.** The interfaces work and are tested — 2,306 tests at 98.54%
+> line coverage, with the full transport matrix exercised against real
+> processes — but they can still change between releases. Please file
+> reproducible failures through
 > [GitHub Issues](https://github.com/qualixar/slm-mcp-hub/issues).
 
 ## Why
@@ -83,6 +85,18 @@ npm install -g slm-mcp-hub
 
 The two packages are release-locked. Installation fails loudly rather than
 falling back to a mismatched version or modifying an externally managed Python.
+
+Two optional extras, both off by default:
+
+```bash
+pip install 'slm-mcp-hub[network]'        # zeroconf: discover servers on the LAN
+pip install 'slm-mcp-hub[observability]'  # psutil: per-backend RAM in the metrics
+pip install 'slm-mcp-hub[full]'           # both of the above
+```
+
+Nothing else is pulled in. The hub talks to SuperLocalMemory over HTTP, so
+`[full]` does not install a memory engine, a model runtime, or anything else you
+did not ask for — see [SuperLocalMemory](#superlocalmemory) below.
 
 ## Quick start
 
@@ -331,6 +345,11 @@ boundary whenever traffic leaves the host.
 
 ## SuperLocalMemory
 
+The hub integrates with [SuperLocalMemory](https://github.com/qualixar/superlocalmemory)
+over HTTP, not through a Python import. There is no extra to install and no
+version to match — the hub works with whatever SLM release you are running,
+because the daemon's HTTP API is the only contract between them.
+
 Run the SLM daemon as its own process, then enable the direct hub plugins:
 
 ```json
@@ -365,6 +384,11 @@ python -m venv .venv
 .venv/bin/pytest --cov=slm_mcp_hub
 npm test
 ```
+
+v0.3.2 ships at **2,306 tests and 98.54% line coverage**. The transport matrix
+is exercised with real processes, not mocks: stdio, Streamable HTTP, SSE, and
+OAuth-protected HTTP upstreams, across both downstream transports, plus the full
+lazy-spawn, idle-eviction, and on-demand-reconnect cycle.
 
 The release gate requires more than 97% Python line coverage, clean linting,
 wheel and sdist package inspection, isolated install tests, dependency audits,

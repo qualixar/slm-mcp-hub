@@ -51,6 +51,39 @@ def test_pyproject_declares_v030_runtime_dependencies() -> None:
     assert "httpx2>=2.9,<3" in normalized, normalized
 
 
+def test_no_extra_depends_on_superlocalmemory() -> None:
+    """The SLM and mesh plugins reach the daemon over HTTP (SLM_DAEMON_URL) and
+    import no Python package — `grep -r 'import superlocalmemory' src/` is empty.
+
+    Up to v0.3.1 the `slm`, `mesh`, and `full` extras still declared
+    `superlocalmemory>=3.4.0`, a leftover of the v0.1.0 plugin that called
+    `superlocalmemory.get_engine()` before being rewritten to HTTP. The cost was
+    real: `pip install slm-mcp-hub[full]` resolved an entire transformer stack
+    (sentence-transformers, transformers, onnxruntime) and could shadow a user's
+    own SuperLocalMemory install with an older one.
+
+    This is a mechanical guard, not a style check. Re-adding the dependency to
+    any extra fails here rather than shipping.
+    """
+    extras = _pyproject()["project"].get("optional-dependencies", {})
+    offenders = {
+        name: [dep for dep in deps if "superlocalmemory" in dep.lower()]
+        for name, deps in extras.items()
+    }
+    assert not any(offenders.values()), (
+        "No extra may depend on superlocalmemory — the plugins are HTTP clients. "
+        f"Offending extras: { {k: v for k, v in offenders.items() if v} }"
+    )
+
+
+def test_full_extra_is_the_union_of_real_extras() -> None:
+    """`full` is the name users type. It must stay installable and must resolve
+    to exactly the extras the hub actually uses — no more, no less."""
+    extras = _pyproject()["project"]["optional-dependencies"]
+    expected = {dep.replace(" ", "") for dep in extras["network"] + extras["observability"]}
+    assert {dep.replace(" ", "") for dep in extras["full"]} == expected
+
+
 def test_pyproject_targets_python_314() -> None:
     classifiers = _pyproject()["project"]["classifiers"]
     assert "Programming Language :: Python :: 3.14" in classifiers
