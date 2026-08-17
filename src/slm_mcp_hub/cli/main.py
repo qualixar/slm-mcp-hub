@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import json
 import logging
 import os
 import sys
@@ -160,7 +161,14 @@ def start(
     """Start the hub server. Kills any existing hub first."""
     _setup_logging(log_level)
     _load_secrets()
-    config = load_config(config_path)
+    try:
+        config = load_config(config_path)
+    except json.JSONDecodeError as exc:
+        source = config_path or get_config_file()
+        raise click.ClickException(
+            f"Invalid JSON in {source} at line {exc.lineno}, "
+            f"column {exc.colno}: {exc.msg}"
+        ) from exc
 
     # Allow env var or CLI flag to enable SDK mode
     if not sdk_mode:
