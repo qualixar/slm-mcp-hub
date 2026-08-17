@@ -113,6 +113,18 @@ class TestCLI:
         # The command should have run
         assert result.exit_code == 0
 
+    def test_cli_start_reports_invalid_json(self, tmp_path):
+        """Malformed config should produce an actionable CLI error."""
+        config_path = tmp_path / "config.json"
+        config_path.write_text('{"mcpServers": {"broken": ${TOKEN}}}')
+
+        result = runner.invoke(cli, ["start", "--config", str(config_path)])
+
+        assert result.exit_code != 0
+        assert "Invalid JSON" in result.output
+        assert str(config_path) in result.output
+        assert "line 1" in result.output
+
     def test_cli_start_keyboard_interrupt(self, tmp_path, monkeypatch):
         """Test start command handles KeyboardInterrupt (line 76-77)."""
         config_data = {"host": "127.0.0.1", "port": 55555, "mcpServers": {}}
