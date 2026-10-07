@@ -5,6 +5,26 @@ All notable changes to SLM MCP Hub will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **MCP 2026-07-28 clients no longer reject the hub's list results.** Claude Code
+  2.1.292 reported `Connected · tools fetch failed — Invalid result for
+  tools/list: missing required resultType`. The 2026-07-28 schema requires
+  `resultType` on every result and `ttlMs` + `cacheScope` on the cacheable ones
+  (`server/discover`, the `*/list` methods, `resources/read`). The hand-rolled
+  JSON-RPC path (default HTTP mode and the `slm-hub mcp` stdio transport) emitted
+  none of them. It now adds `resultType: "complete"` to every result of a modern
+  request, plus `ttlMs: 0` / `cacheScope: "private"` on cacheable results
+  (immediately stale: the federated registry changes as backends connect).
+
+  A request is modern when `params._meta` declares protocol `2026-07-28`, or it
+  is `server/discover`. Legacy `initialize`-era clients keep the exact old result
+  shape, where an absent `resultType` means "complete". Values a modern backend
+  already set (e.g. `input_required`) are preserved. The SDK path
+  (`--sdk-mode`) already emitted the envelope and is unchanged.
+
 ## [0.3.3] - 2026-08-06
 
 ### Fixed
