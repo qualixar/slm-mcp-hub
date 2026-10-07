@@ -5,7 +5,7 @@ All notable changes to SLM MCP Hub will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.3.4] - 2026-10-07
 
 ### Fixed
 
@@ -24,6 +24,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shape, where an absent `resultType` means "complete". Values a modern backend
   already set (e.g. `input_required`) are preserved. The SDK path
   (`--sdk-mode`) already emitted the envelope and is unchanged.
+
+### Changed
+
+- Release metadata repaired so `scripts/release_gate.py` passes again:
+  `CITATION.cff` and the `package-lock.json` root entry still said `0.3.0`.
 
 ## [0.3.3] - 2026-08-06
 
