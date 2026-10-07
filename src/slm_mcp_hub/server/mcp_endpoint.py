@@ -19,11 +19,13 @@ from slm_mcp_hub.protocol.conversion import (
     call_tool_outcome_to_wire,
     discover_to_wire,
     initialize_to_wire,
+    is_modern_request,
     prompt_get_to_wire,
     prompts_list_to_wire,
     resource_read_to_wire,
     resource_templates_list_to_wire,
     resources_list_to_wire,
+    to_modern_result,
     tools_list_to_wire,
 )
 
@@ -265,6 +267,8 @@ class MCPEndpoint:
 
         try:
             result = await handler(session_id, params)
+            if is_modern_request(message):
+                result = to_modern_result(method, result)
             return {"jsonrpc": "2.0", "id": msg_id, "result": result}
         except InvalidParams as exc:
             logger.debug("Invalid params for %s: %s", method, exc)

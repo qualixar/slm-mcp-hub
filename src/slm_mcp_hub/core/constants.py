@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 # Version
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 
 
 def get_config_dir() -> Path:

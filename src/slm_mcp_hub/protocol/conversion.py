@@ -15,6 +15,7 @@ from typing import Any
 
 import mcp.types as t
 
+from slm_mcp_hub.core.constants import MCP_MODERN_PROTOCOL_VERSION
 from slm_mcp_hub.protocol.models import (
     CallToolOutcome,
     DiscoverOutcome,
@@ -26,6 +27,62 @@ from slm_mcp_hub.protocol.models import (
     ResourceTemplatesListOutcome,
     ToolsListOutcome,
 )
+
+# ---------------------------------------------------------------------------
+# MCP 2026-07-28 result envelope
+# ---------------------------------------------------------------------------
+
+_META_VERSION_KEY = "io.modelcontextprotocol/protocolVersion"
+
+# Methods whose result is a ``CacheableResult`` in the 2026-07-28 schema
+# (``ttlMs`` + ``cacheScope`` are required alongside ``resultType``).
+_CACHEABLE_METHODS = frozenset({
+    "server/discover",
+    "tools/list",
+    "resources/list",
+    "resources/templates/list",
+    "resources/read",
+    "prompts/list",
+})
+
+# ttlMs=0 marks the result immediately stale: the federated registry changes as
+# backends connect and drop, so a downstream client must not pin a stale view.
+# "private" because visibility can depend on the caller's authorization context.
+_DEFAULT_TTL_MS = 0
+_DEFAULT_CACHE_SCOPE = "private"
+
+
+def is_modern_request(message: dict[str, Any]) -> bool:
+    """True when *message* is a 2026-07-28 request.
+
+    The modern revision has no handshake: every request declares its protocol
+    version in ``params._meta``. ``server/discover`` exists only in the modern
+    revision, so it is always answered in the modern envelope. A legacy
+    (``initialize``-era) request carries neither marker and keeps the legacy
+    result shape, where an absent ``resultType`` means "complete".
+    """
+    if message.get("method") == "server/discover":
+        return True
+    params = message.get("params")
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    return isinstance(meta, dict) and meta.get(_META_VERSION_KEY) == MCP_MODERN_PROTOCOL_VERSION
+
+
+def to_modern_result(method: str, result: dict[str, Any]) -> dict[str, Any]:
+    """Return *result* wrapped for MCP 2026-07-28 without mutating the input.
+
+    Adds the required ``resultType`` (``"complete"``) and, for cacheable
+    methods, ``ttlMs`` / ``cacheScope``. Values already present are kept, so a
+    federated backend that speaks the modern revision keeps its own envelope
+    (e.g. an ``input_required`` result) instead of being overwritten.
+    """
+    wrapped = dict(result)
+    wrapped.setdefault("resultType", "complete")
+    if method in _CACHEABLE_METHODS:
+        wrapped.setdefault("ttlMs", _DEFAULT_TTL_MS)
+        wrapped.setdefault("cacheScope", _DEFAULT_CACHE_SCOPE)
+    return wrapped
+
 
 # ---------------------------------------------------------------------------
 # Direction 1: neutral → wire dicts
