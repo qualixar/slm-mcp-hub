@@ -19,9 +19,13 @@ Qualixar's work on AI Reliability Engineering.
 Windsurf, Claude Desktop, custom agents) against a shared set of servers — or
 anyone whose machine is buckling under duplicate MCP subprocesses.
 
-> **Alpha software.** The interfaces work and are tested — 2,306 tests at 98.54%
-> line coverage, with the full transport matrix exercised against real
-> processes — but they can still change between releases. Please file
+The badges above track the current release on PyPI and npm. What changed in each
+one is in the [CHANGELOG](CHANGELOG.md), and every release has notes on the
+[releases page](https://github.com/qualixar/slm-mcp-hub/releases).
+
+> **Alpha software.** The interfaces work and are tested — over 2,300 tests at
+> more than 98% line coverage, with the full transport matrix exercised against
+> real processes — but they can still change between releases. Please file
 > reproducible failures through
 > [GitHub Issues](https://github.com/qualixar/slm-mcp-hub/issues).
 
@@ -385,8 +389,9 @@ python -m venv .venv
 npm test
 ```
 
-v0.3.2 ships at **2,306 tests and 98.54% line coverage**. The transport matrix
-is exercised with real processes, not mocks: stdio, Streamable HTTP, SSE, and
+The suite runs **over 2,300 tests at more than 98% line coverage**, and the
+release gate below enforces that floor on every build. The transport matrix is
+exercised with real processes, not mocks: stdio, Streamable HTTP, SSE, and
 OAuth-protected HTTP upstreams, across both downstream transports, plus the full
 lazy-spawn, idle-eviction, and on-demand-reconnect cycle.
 
